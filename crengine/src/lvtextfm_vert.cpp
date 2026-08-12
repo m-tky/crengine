@@ -1286,7 +1286,13 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
                     // trailing blank of the em-square may be clipped at clip.bottom.
                     if ( fmt->m_hanging_punctuation && isVerticalHangingChar(fmt->m_text[i]) ) {
                         int prev_adv = fit.used - eff_adv;
-                        if ( y + prev_adv <= maxHeight + fitSpaceReduceWidth ) {
+                        // There must be at least one drawable pixel left in the
+                        // column. If the preceding content ends exactly at the
+                        // boundary, the punctuation starts at clip.bottom and
+                        // is clipped away completely; let it start the next
+                        // column instead. This matches the later burasagari
+                        // boundary check below.
+                        if ( y + prev_adv < maxHeight + fitSpaceReduceWidth ) {
                             lastNormalWrap = i;  // include this char in current column
                             i++;
                             break;
