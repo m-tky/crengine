@@ -47,13 +47,13 @@
 # define _LARGEFILE64_SOURCE                 1
 #endif
 #define LVLONG_FILE_SUPPORT                  0
-#define USE_ANSI_FILES                       1
+#define USE_ANSI_FILES                       0
 #define FILE_STREAM_BUFFER_SIZE              0x20000   // 128.0 KiB
 #define ZIP_STREAM_BUFFER_SIZE               0x40000   // 256.0 KiB
 
 /// System.
 #define CR_USE_THREADS                       0
-#define LDOM_USE_OWN_MEM_MAN                 1
+#define LDOM_USE_OWN_MEM_MAN                 @USE_OWN_MEM_MAN@
 
 /// Text.
 #define USE_LIMITED_FONT_SIZES_SET           0
