@@ -1286,13 +1286,7 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
                     // trailing blank of the em-square may be clipped at clip.bottom.
                     if ( fmt->m_hanging_punctuation && isVerticalHangingChar(fmt->m_text[i]) ) {
                         int prev_adv = fit.used - eff_adv;
-                        // There must be at least one drawable pixel left in the
-                        // column. If the preceding content ends exactly at the
-                        // boundary, the punctuation starts at clip.bottom and
-                        // is clipped away completely; let it start the next
-                        // column instead. This matches the later burasagari
-                        // boundary check below.
-                        if ( y + prev_adv < maxHeight + fitSpaceReduceWidth ) {
+                        if ( y + prev_adv <= maxHeight + fitSpaceReduceWidth ) {
                             lastNormalWrap = i;  // include this char in current column
                             i++;
                             break;
@@ -2646,8 +2640,14 @@ void applyVerticalWordDraw(
     }
     state.vert_prev_plain_y0 = y0_out;
     state.vert_prev_effective_width = effective_width;
-    // Skip when slot start is at/past clip.bottom; descent can legitimately
-    // extend a few px past clip.bottom for the last char (buf->Draw clips it).
-    if ( y0_out >= clip.bottom )
+    // A hanging punctuation slot may start exactly at the regular content
+    // clip bottom: its ink belongs in the bottom margin. LFormattedText::Draw
+    // has already widened the active DrawBuf clip to content_overflow_clip for
+    // a fully contained vertical column, so let DrawTextString use that clip.
+    // Keep the regular early-out for every other character.
+    bool is_hanging_punctuation = srcline->t.text && word->t.len == 1
+            && isVerticalHangingChar(srcline->t.text[word->t.start]);
+    if ( y0_out >= clip.bottom
+            && !(is_hanging_punctuation && y0_out == clip.bottom) )
         vert_skip_draw_out = true;
 }
