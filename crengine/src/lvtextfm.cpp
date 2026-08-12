@@ -7140,13 +7140,6 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         buf->SetBackgroundColor( bgcl );
                     // Add drawing flags: text decoration (underline...)
                     lUInt32 drawFlags = srcline->flags & LTEXT_TD_MASK;
-                    // The formatter has already mapped vertical CSS sides to
-                    // the font's physical decoration flags. Convert only for
-                    // CSS owner lookup below; DrawTextString() expects the
-                    // original physical flags.
-                    lUInt32 cssDecorationFlags = is_vertical
-                            ? mapVerticalTextDecorationFlags(drawFlags)
-                            : drawFlags;
                     // and chars direction, and if word begins or ends paragraph (for Harfbuzz)
                     drawFlags |= WORD_FLAGS_TO_FNT_FLAGS(word->flags);
                     // For debugging, to visually see overlap/italic correction:
@@ -7213,19 +7206,18 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             */
                         }
                     }
-                    // CSS text-decoration and inline borders share the same
-                    // logical inline-end edge.  In vertical-rl that is the
-                    // column's right edge, independent of a descendant's
-                    // font size or glyph box.
+                    // Resolve vertical text-decoration from the column edges,
+                    // independent of a descendant's font size or glyph box.
                     if ( is_vertical && !(drawFlags & LFNT_HINT_TRANSFORM_STRETCH) ) {
                         VerticalDecorationMetrics metrics = {
+                            line_x - (int)frmline->height,
                             line_x,
                             0,
                             0,
                             NULL
                         };
                         getVerticalDecorationMetrics(m_pbuffer, frmline,
-                                (ldomNode *)srcline->object, cssDecorationFlags, line_x,
+                                (ldomNode *)srcline->object, drawFlags, line_x,
                                 metrics);
                         vertical_decoration_owner = metrics.owner;
                         if ( vertical_decoration_owner == last_vertical_decoration_owner
@@ -7233,11 +7225,18 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             text_decoration_back_gap = word->x
                                     - last_vertical_decoration_end;
                         }
-                        // A vertical underline and border-right occupy the same
-                        // logical inline-end edge. Start the underline at the
-                        // border's inner edge so the two CSS strokes overlap,
-                        // instead of rendering as adjacent/doubled rules.
-                        h = metrics.inline_end - metrics.inline_end_border_width;
+                        if ( drawFlags & LTEXT_TD_OVERLINE ) {
+                            // A vertical overline is the left-side sideline.
+                            h = metrics.inline_start;
+                        }
+                        else {
+                            // A vertical underline and border-right occupy the
+                            // same logical inline-end edge. Start the underline
+                            // at the border's inner edge so the two CSS strokes
+                            // overlap instead of becoming adjacent rules.
+                            h = metrics.inline_end
+                                    - metrics.inline_end_border_width;
+                        }
                         if ( metrics.thickness > 0 ) {
                             if ( metrics.thickness > 0xFF )
                                 metrics.thickness = 0xFF;

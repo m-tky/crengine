@@ -41,9 +41,6 @@ int initVerticalDrawSetup(
     formatted_text_fragment_t * pbuffer, LVDrawBuf * buf,
     int & x_inout, int & y_inout, const lvRect & clip);
 
-// Maps CSS decoration flags to the physical sides used by vertical drawing.
-lUInt32 mapVerticalTextDecorationFlags(lUInt32 flags);
-
 // State maintained across the per-word loop in LFormattedText::Draw when
 // rendering in vertical-rl / vertical-lr mode.  Bundled into a struct so
 // it can be passed by reference to fork-only positioning helpers in
@@ -127,6 +124,7 @@ bool isVerticalRubyAnnotationLine(LVFormatter * fmt, formatted_line_t * frmline)
 // Geometry and identity inherited from the inline box that establishes a
 // vertical text decoration. Descendant font-size changes must not alter them.
 struct VerticalDecorationMetrics {
+    int inline_start;
     int inline_end;
     int thickness;
     int inline_end_border_width;

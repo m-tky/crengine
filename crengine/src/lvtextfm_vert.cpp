@@ -1694,17 +1694,6 @@ int initVerticalDrawSetup(
     return vert_anchor - x_inout;
 }
 
-lUInt32 mapVerticalTextDecorationFlags(lUInt32 flags)
-{
-    lUInt32 decorations = flags & (LTEXT_TD_UNDERLINE | LTEXT_TD_OVERLINE);
-    flags &= ~(LTEXT_TD_UNDERLINE | LTEXT_TD_OVERLINE);
-    if ( decorations & LTEXT_TD_UNDERLINE )
-        flags |= LTEXT_TD_OVERLINE;
-    if ( decorations & LTEXT_TD_OVERLINE )
-        flags |= LTEXT_TD_UNDERLINE;
-    return flags;
-}
-
 // =============================================================================
 // computeVertRubyInlineBoxMetrics
 //
@@ -2098,7 +2087,6 @@ bool getVerticalDecorationMetrics(formatted_text_fragment_t * pbuffer,
                                   int line_x,
                                   VerticalDecorationMetrics & metrics)
 {
-    (void)pbuffer;
     if ( !node )
         return false;
     if ( node->isEffectiveText() )
@@ -2124,12 +2112,32 @@ bool getVerticalDecorationMetrics(formatted_text_fragment_t * pbuffer,
     metrics.inline_end_border_width = (decoration_flags & LTEXT_TD_UNDERLINE)
             ? measureBorder(decoration_node, 1) : 0;
     metrics.owner = decoration_node;
-    // A Japanese vertical underline is a right-side sideline.  In particular,
-    // it must clear the largest descendant, not the edge of its nominal em
-    // frame.  Ordinary CJK glyphs are placed by the vertical capsule path,
-    // whose hinted advance/bearing can protrude past that frame at small sizes.
-    // line_x is the formatted line box's physical right edge and therefore
-    // remains a single, outside edge for every 90%/140% descendant.
+    // Resolve the largest font in the establishing inline box. A TOC link
+    // commonly switches between 90% and 140% descendants: the left sideline
+    // must follow the largest shared character frame, rather than either the
+    // current run's x (which kinks) or the full line box (which is too far
+    // away when font height exceeds em size).
+    int reference_em = decoration_node->getFont()->getSize();
+    for ( int i = 0; i < pbuffer->srctextlen; i++ ) {
+        ldomNode * candidate = (ldomNode *)pbuffer->srctext[i].object;
+        if ( candidate && candidate->isEffectiveText() )
+            candidate = candidate->getParentNode();
+        for ( ldomNode * current = candidate; current;
+                current = current->getParentNode() ) {
+            if ( current == decoration_node ) {
+                if ( !candidate->getFont().isNull()
+                        && candidate->getFont()->getSize() > reference_em )
+                    reference_em = candidate->getFont()->getSize();
+                break;
+            }
+        }
+    }
+    int column_width = (int)frmline->height;
+    if ( column_width < pbuffer->strut_height )
+        column_width = pbuffer->strut_height;
+    if ( column_width < reference_em )
+        column_width = reference_em;
+    metrics.inline_start = line_x - (column_width + reference_em) / 2;
     metrics.inline_end = line_x;
     return true;
 }
@@ -2164,7 +2172,9 @@ void drawVerticalPadBorders(
                 break;
             }
         }
-        VerticalDecorationMetrics metrics = { line_x, 0, 0, NULL };
+        VerticalDecorationMetrics metrics = {
+            line_x - (int)frmline->height, line_x, 0, 0, NULL
+        };
         getVerticalDecorationMetrics(pbuffer, frmline, node,
                 LTEXT_TD_UNDERLINE, line_x, metrics);
         drawBorderVertical(buf, metrics.inline_end, (int)frmline->height,

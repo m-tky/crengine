@@ -28,7 +28,7 @@
 // Paint CSS text decorations for a run laid out on a vertical inline axis.
 // All font implementations route through this helper so FreeType, small-caps
 // and synthetic-bold runs use identical geometry. `target_h` carries the
-// decoration owner's physical inline-end when the corresponding hint is set.
+// decoration owner's physical edge when the corresponding hint is set.
 static bool drawVerticalTextDecorations(
         LVDrawBuf * buf, int x, int y, int width, int advance,
         int font_size, int font_height, int thickness,
@@ -56,8 +56,14 @@ static bool drawVerticalTextDecorations(
         // (including overlap with a coincident inline-end border).
         buf->FillRect(inline_end, y0, inline_end + thickness, y1, color);
     }
-    if ( flags & LFNT_DRAW_OVERLINE )
-        buf->FillRect(x, y0, x + thickness, y1, color);
+    if ( flags & LFNT_DRAW_OVERLINE ) {
+        int inline_start = (flags & LFNT_HINT_VERTICAL_DECORATION_EDGE)
+                ? target_h : x;
+        // In vertical-rl, an overline is painted on the left (over) side.
+        // Resolve it from the decoration owner just like the right-side
+        // underline, so nested font-size changes cannot kink the rule.
+        buf->FillRect(inline_start, y0, inline_start + thickness, y1, color);
+    }
     if ( flags & LFNT_DRAW_LINE_THROUGH ) {
         int line_x = x + (cross_extent - thickness) / 2;
         buf->FillRect(line_x, y0, line_x + thickness, y1, color);
