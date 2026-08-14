@@ -2518,7 +2518,11 @@ void applyVerticalWordDraw(
         // horizontally and vertically.
         int em = font->getSize();
         int clamped_x = vertClampForward((int)word->x, state.vert_min_next_x);
-        x0_out = line_x - frmline->height + (frmline->height - em) / 2;
+        int tcy_run_width = (int)font->getTextWidth(
+                srcline->t.text + word->t.start, (int)word->t.len,
+                srcline->lang_cfg);
+        int em_x = line_x - frmline->height + (frmline->height - em) / 2;
+        x0_out = em_x + (em - tcy_run_width) / 2;
         int y_slot_start = y + frmline->x + clamped_x;
         y0_out = y_slot_start + (em - font->getHeight()) / 2;
         // Advance the DRAW tracker the same way the LAYOUT post-pass does for a
