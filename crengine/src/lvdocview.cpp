@@ -2106,6 +2106,9 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 	// The column anchor is stored separately so Draw() can use it for positioning.
 	draw_extra_info.content_overflow_clip.right = fullRect.right;
 	draw_extra_info.vert_column_clip_right = is_vert ? clip.right : 0;
+	draw_extra_info.writing_mode = page.writing_mode;
+	if ( draw_extra_info.writing_mode == css_wm_inherit )
+		draw_extra_info.writing_mode = is_vert ? css_wm_vertical_rl : css_wm_horizontal_tb;
 
 	if (hasTwoVisiblePages) {
 		// Don't trust pageRects and their tweaked middle margin

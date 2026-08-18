@@ -24,6 +24,10 @@ extern int ltext_vert_image_cross_underreserve_max_px;
 extern int ltext_vert_mixed_image_axis_sample_count;
 extern int ltext_vert_mixed_image_axis_drift_count;
 extern int ltext_vert_mixed_image_axis_drift_max_px;
+extern int ltext_vert_single_image_placement_sample_count;
+extern int ltext_vert_single_image_clip_overflow_count;
+extern int ltext_vert_single_image_clip_overflow_max_px;
+extern int ltext_vert_single_image_center_error_max_px;
 
 void ltext_reset_vert_ruby_adv_diff();
 void ltext_get_vert_ruby_adv_diff(int *total_out, int *max_out);
@@ -43,5 +47,9 @@ void ltext_get_vert_image_cross_underreserve(int *count_out, int *max_px_out);
 void ltext_reset_vert_mixed_image_axis();
 void ltext_get_vert_mixed_image_axis(
     int *sample_count_out, int *drift_count_out, int *max_px_out);
+void ltext_reset_vert_single_image_placement();
+void ltext_get_vert_single_image_placement(
+    int *sample_count_out, int *clip_overflow_count_out,
+    int *clip_overflow_max_px_out, int *center_error_max_px_out);
 
 #endif // LVTEXTFM_VERT_DIAG_H_INCLUDED

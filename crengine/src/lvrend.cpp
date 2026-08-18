@@ -9475,7 +9475,8 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                     // (No need to account for margin-top, as we pushed vertical margin
                     // just above if there were floats.)
 
-                int final_h = enode->renderFinalBlock( txform, &fmt, inner_width, &float_footprint );
+                int final_h = enode->renderFinalBlock( txform, &fmt, inner_width,
+                                                       &float_footprint, flow->getWritingMode() );
                 int vertical_used_inline_size = 0;
                 if ( flow->isVertical() && auto_width ) {
                     int used_end = 0;
@@ -11450,7 +11451,12 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
 
                 // draw whole node content as single formatted object
                 LFormattedTextRef txform;
-                enode->renderFinalBlock( txform, &fmt, inner_width );
+                draw_extra_info_t * draw_extra_info =
+                        (draw_extra_info_t*)drawbuf.GetDrawExtraInfo();
+                int page_writing_mode = draw_extra_info
+                        ? draw_extra_info->writing_mode : css_wm_inherit;
+                enode->renderFinalBlock( txform, &fmt, inner_width,
+                                         NULL, page_writing_mode );
                 fmt.push();
                 {
                     lvRect rc;

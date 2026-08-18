@@ -1284,7 +1284,8 @@ public:
     int getSurroundingAddedHeight(bool account_height_below_strut_baseline=false);
     /// formats final block
     int renderFinalBlock( LFormattedTextRef & frmtext, RenderRectAccessor * fmt, int width,
-                              BlockFloatFootprint * float_footprint=NULL );
+                              BlockFloatFootprint * float_footprint=NULL,
+                              int context_writing_mode=css_wm_inherit );
     /// formats final block again after change, returns true if size of block is changed
     bool refreshFinalBlock();
 #endif
