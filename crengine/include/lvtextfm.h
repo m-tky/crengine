@@ -528,6 +528,11 @@ public:
         return m_pbuffer->width;
     }
 
+    int GetWritingMode()
+    {
+        return m_pbuffer->writing_mode;
+    }
+
     const src_text_fragment_t * GetSrcInfo(int index)
     {
         return &m_pbuffer->srctext[index];

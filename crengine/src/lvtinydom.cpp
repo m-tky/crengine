@@ -22319,7 +22319,8 @@ int ldomNode::getSurroundingAddedHeight(bool account_height_below_strut_baseline
 // (as ::renderFinalBlock( this, f.get(), fmt...) needs it to compute text-indent in %
 // 'int width' is the available width for the inner content, and so
 // caller must exclude block node padding from it.
-int ldomNode::renderFinalBlock(  LFormattedTextRef & frmtext, RenderRectAccessor * fmt, int width, BlockFloatFootprint * float_footprint )
+int ldomNode::renderFinalBlock(  LFormattedTextRef & frmtext, RenderRectAccessor * fmt, int width,
+                                BlockFloatFootprint * float_footprint, int context_writing_mode )
 {
     ASSERT_NODE_NOT_NULL;
     if ( !isElement() )
@@ -22329,8 +22330,33 @@ int ldomNode::renderFinalBlock(  LFormattedTextRef & frmtext, RenderRectAccessor
     LFormattedTextRef f;
     lvdom_element_render_method rm = getRendMethod();
 
+    // Resolve the writing mode from the styled DOM when possible. crengine keeps
+    // the specified value on each node, so a whole fragment whose nodes all use
+    // `inherit` cannot recover the document/flow mode by walking its ancestors.
+    // In that case, use the mode resolved by the enclosing block flow.
+    int effective_writing_mode = getStyle()->writing_mode;
+    if ( effective_writing_mode == css_wm_inherit ) {
+        for (ldomNode * p = getParentNode(); p && p->isElement(); p = p->getParentNode()) {
+            css_style_ref_t ps = p->getStyle();
+            if ( !ps.isNull() && ps->writing_mode != css_wm_inherit ) {
+                effective_writing_mode = ps->writing_mode;
+                break;
+            }
+        }
+    }
+    if ( effective_writing_mode == css_wm_inherit
+            && context_writing_mode != css_wm_inherit ) {
+        effective_writing_mode = context_writing_mode;
+    }
+    bool writing_mode_is_resolved = effective_writing_mode != css_wm_inherit;
+
     if ( cache.get( this, f ) ) {
-        if ( f->isReusable() ) {
+        // A reusable object may have been created by an earlier measurement
+        // call that had no block-flow context and therefore treated `inherit`
+        // as horizontal. Do not reuse it once layout supplies a resolved mode.
+        if ( f->isReusable()
+                && (!writing_mode_is_resolved
+                    || f->GetWritingMode() == effective_writing_mode) ) {
             frmtext = f;
             if ( rm != erm_final )
                 return 0;
@@ -22379,7 +22405,7 @@ int ldomNode::renderFinalBlock(  LFormattedTextRef & frmtext, RenderRectAccessor
     // for a decorated parent block: each column must leave room for its physical
     // top and bottom edges instead of allowing text to overwrite the bottom inset.
     {
-        css_writing_mode_t wm = getStyle()->writing_mode;
+        css_writing_mode_t wm = (css_writing_mode_t)effective_writing_mode;
         if (css_wm_is_vertical(wm)) {
             CSSLogical L(wm);
             int bvo = fmt->getX();
@@ -22432,16 +22458,6 @@ int ldomNode::renderFinalBlock(  LFormattedTextRef & frmtext, RenderRectAccessor
     // and running it only before paint gives layout and paint two different
     // geometries, so vertical final blocks must be fully formatted once and
     // kept reusable.
-    int effective_writing_mode = getStyle()->writing_mode;
-    if ( effective_writing_mode == 0 ) { // css_wm_inherit
-        for (ldomNode * p = getParentNode(); p && p->isElement(); p = p->getParentNode()) {
-            css_style_ref_t ps = p->getStyle();
-            if ( !ps.isNull() && ps->writing_mode != 0 ) {
-                effective_writing_mode = ps->writing_mode;
-                break;
-            }
-        }
-    }
     if ( !getDocument()->isRendered() && !css_wm_is_vertical(effective_writing_mode) ) {
         // Full rendering in progress: avoid some uneeded work that
         // is only needed when we'll be drawing the formatted text

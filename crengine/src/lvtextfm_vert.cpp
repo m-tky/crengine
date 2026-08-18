@@ -222,6 +222,10 @@ int ltext_vert_image_cross_underreserve_max_px = 0;
 int ltext_vert_mixed_image_axis_sample_count = 0;
 int ltext_vert_mixed_image_axis_drift_count = 0;
 int ltext_vert_mixed_image_axis_drift_max_px = 0;
+int ltext_vert_single_image_placement_sample_count = 0;
+int ltext_vert_single_image_clip_overflow_count = 0;
+int ltext_vert_single_image_clip_overflow_max_px = 0;
+int ltext_vert_single_image_center_error_max_px = 0;
 
 void ltext_reset_vert_image_draw_drift() {
     ltext_vert_image_draw_count = 0;
@@ -255,6 +259,23 @@ void ltext_get_vert_mixed_image_axis(int *sample_count_out, int *drift_count_out
     *sample_count_out = ltext_vert_mixed_image_axis_sample_count;
     *drift_count_out = ltext_vert_mixed_image_axis_drift_count;
     *max_px_out = ltext_vert_mixed_image_axis_drift_max_px;
+}
+
+void ltext_reset_vert_single_image_placement() {
+    ltext_vert_single_image_placement_sample_count = 0;
+    ltext_vert_single_image_clip_overflow_count = 0;
+    ltext_vert_single_image_clip_overflow_max_px = 0;
+    ltext_vert_single_image_center_error_max_px = 0;
+}
+
+void ltext_get_vert_single_image_placement(
+    int *sample_count_out, int *clip_overflow_count_out,
+    int *clip_overflow_max_px_out, int *center_error_max_px_out)
+{
+    *sample_count_out = ltext_vert_single_image_placement_sample_count;
+    *clip_overflow_count_out = ltext_vert_single_image_clip_overflow_count;
+    *clip_overflow_max_px_out = ltext_vert_single_image_clip_overflow_max_px;
+    *center_error_max_px_out = ltext_vert_single_image_center_error_max_px;
 }
 
 void ltext_reset_vert_bleed() {
@@ -341,6 +362,22 @@ static inline int getVerticalEffectiveTextWidth( int width, int em, bool cjk, JL
 
 static inline int getVerticalImageInlineAdvance( formatted_word_t * word ) {
     return word && word->o.height > 0 ? (int)word->o.height : (int)word->width;
+}
+
+// A vertical image advances down the inline axis by its physical height.
+// addLineHorizontal() initially stores its physical width in frmline->width,
+// which makes text-align center/right use the cross-axis size. Give alignment
+// the vertical inline extent up front; applyVerticalFrmlineDimensions() will
+// still reserve the physical image width across columns afterwards.
+void prepareVerticalSingleImageLineAlignment(
+    LVFormatter * fmt, formatted_line_t * frmline)
+{
+    if ( !css_wm_is_vertical(fmt->m_writing_mode)
+            || frmline->word_count != 1 )
+        return;
+    formatted_word_t * word = &frmline->words[0];
+    if ( word->flags & LTEXT_WORD_IS_IMAGE )
+        frmline->width = getVerticalImageInlineAdvance(word);
 }
 
 static VertWordLayoutInfo getVerticalWordLayoutInfo( LVFormatter* fmt, formatted_word_t * word ) {
@@ -2304,7 +2341,8 @@ void drawVerticalEmphasisMarks(
 // =============================================================================
 void applyVerticalImageDraw(
     formatted_line_t * frmline, formatted_word_t * word,
-    int y, int line_x, int column_clip_right, VerticalDrawState & state,
+    int y, int line_x, int column_clip_right, const lvRect & clip,
+    VerticalDrawState & state,
     int & x0_out, int & y0_out)
 {
     // In vertical-rl after the x/y swap at Draw() entry:
@@ -2352,6 +2390,37 @@ void applyVerticalImageDraw(
         ltext_vert_image_draw_drift_count++;
         if ( drift > ltext_vert_image_draw_drift_max_px )
             ltext_vert_image_draw_drift_max_px = drift;
+    }
+    // A line containing only an image is the shape used by full-page
+    // illustrations. Keep the same numeric evidence as KO_DEBUG_VERT_BG so a
+    // regression test can verify clipping and centering without comparing
+    // screenshots or parsing human-readable stderr output.
+    if ( frmline->word_count == 1 ) {
+        ltext_vert_single_image_placement_sample_count++;
+        int overflow = clip.left - x0_out;
+        if ( overflow < 0 )
+            overflow = 0;
+        int edge_overflow = x0_out + img_w - clip.right;
+        if ( edge_overflow > overflow )
+            overflow = edge_overflow;
+        edge_overflow = clip.top - y0_out;
+        if ( edge_overflow > overflow )
+            overflow = edge_overflow;
+        edge_overflow = y0_out + (int)word->o.height - clip.bottom;
+        if ( edge_overflow > overflow )
+            overflow = edge_overflow;
+        if ( overflow > 0 ) {
+            ltext_vert_single_image_clip_overflow_count++;
+            if ( overflow > ltext_vert_single_image_clip_overflow_max_px )
+                ltext_vert_single_image_clip_overflow_max_px = overflow;
+        }
+        int leading_gap = y0_out - clip.top;
+        int trailing_gap = clip.bottom - (y0_out + (int)word->o.height);
+        int center_error = leading_gap - trailing_gap;
+        if ( center_error < 0 )
+            center_error = -center_error;
+        if ( center_error > ltext_vert_single_image_center_error_max_px )
+            ltext_vert_single_image_center_error_max_px = center_error;
     }
     // Advance the per-column tracker past the image.  Plain CJK words derive
     // their draw position SOLELY from state.vert_min_next_x (see

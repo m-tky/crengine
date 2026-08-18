@@ -133,6 +133,10 @@ typedef struct {
     // draw into the right margin, but the column anchor must stay at the original
     // clip.right so that all columns (including ruby groups) are positioned correctly.
     int vert_column_clip_right;
+    // Resolved writing mode of the page being drawn. Final blocks whose DOM
+    // styles all keep the specified value `inherit` need this to avoid being
+    // reformatted as horizontal after vertical layout.
+    int writing_mode;
 } draw_extra_info_t;
 
 /// returns true if styles are identical

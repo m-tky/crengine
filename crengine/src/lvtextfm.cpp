@@ -5129,6 +5129,7 @@ void addLineHorizontal( LVFormatter* fmt, int start, int end, int x, src_text_fr
 
         if ( !light_formatting ) {
             // Fix up words position and width to ensure requested alignment and indent
+            prepareVerticalSingleImageLineAlignment(fmt, frmline);
             alignLineHorizontal( fmt, frmline, align, rightIndent, hasInlineBoxes );
         }
 
@@ -6984,7 +6985,8 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             int x0, y0;
                             int column_clip_right = draw_extra_info && draw_extra_info->vert_column_clip_right
                                     ? draw_extra_info->vert_column_clip_right : clip.right;
-                            applyVerticalImageDraw(frmline, word, y, line_x, column_clip_right, vstate, x0, y0);
+                            applyVerticalImageDraw(frmline, word, y, line_x,
+                                column_clip_right, clip, vstate, x0, y0);
                             if ( verticalTextDebugEnabled() ) {
                                 lString32 img_class = node->getAttributeValue(attr_class);
                                 lString32 parent_class;
