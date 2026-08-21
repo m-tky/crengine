@@ -198,6 +198,8 @@ void applyVerticalInlineBoxDraw(
 //   vert_skip_draw_out  — true if the word starts past clip.bottom
 //   word_is_latin_in_vertical_out, word_is_vert_mark_out — needed by caller
 //     to drive post-DrawTextString state updates and ruby mark drawing.
+//   word_is_exact_hanging_out — true only for supported hanging punctuation
+//     whose draw origin is exactly clip.bottom.
 void applyVerticalWordDraw(
     formatted_text_fragment_t * pbuffer,
     formatted_line_t * frmline, src_text_fragment_t * srcline,
@@ -206,7 +208,8 @@ void applyVerticalWordDraw(
     lUInt32 & drawFlags,
     VerticalDrawState & state,
     int & x0_out, int & y0_out, bool & vert_skip_draw_out,
-    bool & word_is_latin_in_vertical_out, bool & word_is_vert_mark_out);
+    bool & word_is_latin_in_vertical_out, bool & word_is_vert_mark_out,
+    bool & word_is_exact_hanging_out);
 
 // Vertical + inline-box post-pass (defined in lvtextfm_vert.cpp).
 // Handles inline-box absolute positioning, vertical-mode column clamping,

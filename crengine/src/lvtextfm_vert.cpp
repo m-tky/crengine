@@ -226,6 +226,26 @@ int ltext_vert_single_image_placement_sample_count = 0;
 int ltext_vert_single_image_clip_overflow_count = 0;
 int ltext_vert_single_image_clip_overflow_max_px = 0;
 int ltext_vert_single_image_center_error_max_px = 0;
+// Exact-boundary hanging punctuation diagnostics. An attempt is a supported
+// punctuation word whose y0 equals the regular clip bottom; recovery means the
+// per-word overflow clip made it drawable; reject means it was still outside.
+int ltext_vert_exact_hanging_attempt_count = 0;
+int ltext_vert_exact_hanging_clip_recovery_count = 0;
+int ltext_vert_exact_hanging_clip_reject_count = 0;
+
+void ltext_reset_vert_exact_hanging_clip() {
+    ltext_vert_exact_hanging_attempt_count = 0;
+    ltext_vert_exact_hanging_clip_recovery_count = 0;
+    ltext_vert_exact_hanging_clip_reject_count = 0;
+}
+
+void ltext_get_vert_exact_hanging_clip(
+    int *attempt_count_out, int *recovery_count_out, int *reject_count_out)
+{
+    *attempt_count_out = ltext_vert_exact_hanging_attempt_count;
+    *recovery_count_out = ltext_vert_exact_hanging_clip_recovery_count;
+    *reject_count_out = ltext_vert_exact_hanging_clip_reject_count;
+}
 
 void ltext_reset_vert_image_draw_drift() {
     ltext_vert_image_draw_count = 0;
@@ -2551,9 +2571,11 @@ void applyVerticalWordDraw(
     lUInt32 & drawFlags,
     VerticalDrawState & state,
     int & x0_out, int & y0_out, bool & vert_skip_draw_out,
-    bool & word_is_latin_in_vertical_out, bool & word_is_vert_mark_out)
+    bool & word_is_latin_in_vertical_out, bool & word_is_vert_mark_out,
+    bool & word_is_exact_hanging_out)
 {
     vert_skip_draw_out = false;
+    word_is_exact_hanging_out = false;
 
     // Classify the word: vertical mark, Latin-in-vertical, TCY, or plain CJK.
     // Japanese horizontal marks (―, —, …, 〜, etc.) are below U+2E80 and would
@@ -2720,7 +2742,11 @@ void applyVerticalWordDraw(
     // Keep the regular early-out for every other character.
     bool is_hanging_punctuation = srcline->t.text && word->t.len == 1
             && isVerticalHangingChar(srcline->t.text[word->t.start]);
+    word_is_exact_hanging_out = is_hanging_punctuation
+            && y0_out == clip.bottom;
+    if ( word_is_exact_hanging_out )
+        ltext_vert_exact_hanging_attempt_count++;
     if ( y0_out >= clip.bottom
-            && !(is_hanging_punctuation && y0_out == clip.bottom) )
+            && !word_is_exact_hanging_out )
         vert_skip_draw_out = true;
 }
