@@ -28,6 +28,9 @@ extern int ltext_vert_single_image_placement_sample_count;
 extern int ltext_vert_single_image_clip_overflow_count;
 extern int ltext_vert_single_image_clip_overflow_max_px;
 extern int ltext_vert_single_image_center_error_max_px;
+extern int ltext_vert_exact_hanging_attempt_count;
+extern int ltext_vert_exact_hanging_clip_recovery_count;
+extern int ltext_vert_exact_hanging_clip_reject_count;
 
 void ltext_reset_vert_ruby_adv_diff();
 void ltext_get_vert_ruby_adv_diff(int *total_out, int *max_out);
@@ -51,5 +54,8 @@ void ltext_reset_vert_single_image_placement();
 void ltext_get_vert_single_image_placement(
     int *sample_count_out, int *clip_overflow_count_out,
     int *clip_overflow_max_px_out, int *center_error_max_px_out);
+void ltext_reset_vert_exact_hanging_clip();
+void ltext_get_vert_exact_hanging_clip(
+    int *attempt_count_out, int *recovery_count_out, int *reject_count_out);
 
 #endif // LVTEXTFM_VERT_DIAG_H_INCLUDED
