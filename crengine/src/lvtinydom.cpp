@@ -273,6 +273,20 @@ enum CacheFileBlockType {
 #define UNPACK_BUF_SIZE 0x40000
 #endif
 #include <xxhash.h>
+
+// Legacy selection geometry is kept in crengine's logical document axes:
+// fmt.width is inline and fmt.height is block even when the final painting is
+// vertical.  Resolve inherited writing-mode before selecting the physical CSS
+// inset that contributes to each logical axis.
+static css_writing_mode_t resolveSelectionWritingMode(const ldomNode *node)
+{
+    for (const ldomNode *current = node; current; current = current->getParentNode()) {
+        css_style_ref_t style = current->getStyle();
+        if (!style.isNull() && style->writing_mode != css_wm_inherit)
+            return style->writing_mode;
+    }
+    return css_wm_inherit;
+}
 #include <lvtextfm.h>
 #include "../include/lvdocviewprops.h"
 #include "../include/renderutil.h"
@@ -10295,9 +10309,13 @@ ldomXPointer ldomDocument::createXPointer( lvPoint pt, int direction, bool stric
         // In legacy mode, we just got the erm_final coordinates, and we must
         // compute and remove left/top border and padding (using rc.width() as
         // the base for % is wrong here, and so is rc.height() for padding top)
-        int padding_left = measureBorder(finalNode,3)+lengthToPx(finalNode, finalNode->getStyle()->padding[0],rc.width());
-        int padding_right = measureBorder(finalNode,1)+lengthToPx(finalNode, finalNode->getStyle()->padding[1],rc.width());
-        int padding_top = measureBorder(finalNode,0)+lengthToPx(finalNode, finalNode->getStyle()->padding[2],rc.height());
+        CSSLogical logical(resolveSelectionWritingMode(finalNode));
+        int padding_left = measureBorder(finalNode, logical.brdIS())
+            + lengthToPx(finalNode, finalNode->getStyle()->padding[logical.padIS()], rc.width());
+        int padding_right = measureBorder(finalNode, logical.brdIE())
+            + lengthToPx(finalNode, finalNode->getStyle()->padding[logical.padIE()], rc.width());
+        int padding_top = measureBorder(finalNode, logical.brdBS())
+            + lengthToPx(finalNode, finalNode->getStyle()->padding[logical.padBS()], rc.height());
         pt.x -= padding_left;
         pt.y -= padding_top;
         // As well as the inner width
@@ -10775,11 +10793,15 @@ bool ldomXPointer::getRect(lvRect & rect, bool extended, bool adjusted, int * ct
             // In legacy mode, we just got the erm_final coordinates, and we must
             // compute and remove left/top border and padding (using rc.width() as
             // the base for % is wrong here)
-            int padding_left = measureBorder(finalNode,3) + lengthToPx(finalNode, finalNode->getStyle()->padding[0], rc.width());
-            int padding_right = measureBorder(finalNode,1) + lengthToPx(finalNode, finalNode->getStyle()->padding[1], rc.width());
+            CSSLogical logical(resolveSelectionWritingMode(finalNode));
+            int padding_left = measureBorder(finalNode, logical.brdIS())
+                + lengthToPx(finalNode, finalNode->getStyle()->padding[logical.padIS()], rc.width());
+            int padding_right = measureBorder(finalNode, logical.brdIE())
+                + lengthToPx(finalNode, finalNode->getStyle()->padding[logical.padIE()], rc.width());
             inner_width  = fmt.getWidth() - padding_left - padding_right;
             if (extended) {
-                int padding_top = measureBorder(finalNode,0) + lengthToPx(finalNode, finalNode->getStyle()->padding[2], rc.width());
+                int padding_top = measureBorder(finalNode, logical.brdBS())
+                    + lengthToPx(finalNode, finalNode->getStyle()->padding[logical.padBS()], rc.width());
                 rc.top += padding_top;
                 rc.left += padding_left;
                 // rc.right += padding_left; // wrong, but not used
@@ -13795,16 +13817,22 @@ bool ldomXRange::getRectEx( lvRect & rect, bool & isSingleLine )
     // compute and add left/top border and padding (using rc.width() as
     // the base for % is wrong here, and so is rc.height() for padding top)
     if ( ! RENDER_RECT_HAS_FLAG(fmt1, INNER_FIELDS_SET) ) {
-        int padding_left = measureBorder(finalNode1,3) + lengthToPx(finalNode1, finalNode1->getStyle()->padding[0], fmt1.getWidth());
-        int padding_top = measureBorder(finalNode1,0) + lengthToPx(finalNode1, finalNode1->getStyle()->padding[2], fmt1.getWidth());
+        CSSLogical logical(resolveSelectionWritingMode(finalNode1));
+        int padding_left = measureBorder(finalNode1, logical.brdIS())
+            + lengthToPx(finalNode1, finalNode1->getStyle()->padding[logical.padIS()], fmt1.getWidth());
+        int padding_top = measureBorder(finalNode1, logical.brdBS())
+            + lengthToPx(finalNode1, finalNode1->getStyle()->padding[logical.padBS()], fmt1.getWidth());
         rc1.top += padding_top;
         rc1.left += padding_left;
         rc1.right += padding_left;
         rc1.bottom += padding_top;
     }
     if ( ! RENDER_RECT_HAS_FLAG(fmt2, INNER_FIELDS_SET) ) {
-        int padding_left = measureBorder(finalNode2,3) + lengthToPx(finalNode2, finalNode2->getStyle()->padding[0], fmt2.getWidth());
-        int padding_top = measureBorder(finalNode2,0) + lengthToPx(finalNode2, finalNode2->getStyle()->padding[2], fmt2.getWidth());
+        CSSLogical logical(resolveSelectionWritingMode(finalNode2));
+        int padding_left = measureBorder(finalNode2, logical.brdIS())
+            + lengthToPx(finalNode2, finalNode2->getStyle()->padding[logical.padIS()], fmt2.getWidth());
+        int padding_top = measureBorder(finalNode2, logical.brdBS())
+            + lengthToPx(finalNode2, finalNode2->getStyle()->padding[logical.padBS()], fmt2.getWidth());
         rc2.top += padding_top;
         rc2.left += padding_left;
         rc2.right += padding_left;
