@@ -19,6 +19,7 @@
 #include "../include/cssdef.h"
 #include "../include/lvfnt.h"
 #include "../include/lvtextfm.h"
+#include "../include/lvlogical.h"
 #include "../include/lvfntman_vert.h"   // fork-only: JFM class + glue/kern helpers
 #include "../include/lvtextfm_vert_diag.h"
 #include "../include/lvdrawbuf.h"
@@ -2613,27 +2614,26 @@ public:
                         css_style_ref_t style = node->getStyle();
                         int base_width = m_pbuffer->width;
                         int margin, border, padding;
-                        // is_right_pad actually means "logical right" (so, "end"). If bidi has made
-                        // it RTL, it will be shown on the "left" side of a text segment, and so should
-                        // use the left margin/border/padding values (hoping its left pad buddy will also
-                        // be RTL and will rightly use the right margin values).
-                        // (In the context of inline elements, margin/border/padding-inline-start/end
-                        // would be more natural to use than -left/right - but it's a more recent CSS
-                        // addition that we don't support.)
+                        // is_right_pad actually means logical inline-end. If bidi has made
+                        // the run RTL, it is painted at inline-start instead.  CSS
+                        // box values are stored physically, so map them through
+                        // the formatter's paragraph writing mode before consuming
+                        // them: vertical-rl inline insets are top/bottom.
+                        CSSLogical L((css_writing_mode_t)m_pbuffer->writing_mode);
                         bool is_mirrored = lastDirection < 0;
                         if ( is_right_pad != is_mirrored ) { // unmirrored right pad, or mirrored left pad
-                            // Use right margin/border/padding values
-                            margin = lengthToPx( node, style->margin[1], base_width );
-                            border = measureBorder(node, 1);
-                            padding = lengthToPx( node, style->padding[1], base_width );
+                            // Use inline-end margin/border/padding values.
+                            margin = lengthToPx( node, style->margin[L.marIE()], base_width );
+                            border = measureBorder(node, L.brdIE());
+                            padding = lengthToPx( node, style->padding[L.padIE()], base_width );
                             // Give up on locked spacing if it is a right pad
                             first_word_len = -1;
                         }
                         else {
-                            // Use left margin/border/padding values
-                            margin = lengthToPx( node, style->margin[0], base_width );
-                            border = measureBorder(node, 3);
-                            padding = lengthToPx( node, style->padding[0], base_width );
+                            // Use inline-start margin/border/padding values.
+                            margin = lengthToPx( node, style->margin[L.marIS()], base_width );
+                            border = measureBorder(node, L.brdIS());
+                            padding = lengthToPx( node, style->padding[L.padIS()], base_width );
                             // Don't touch first_word_len: we might want to ensure locked
                             // spacing on the first space(s) following a left pad.
                         }
@@ -6870,7 +6870,9 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                 for (j=0; j<frmline->word_count; j++) {
                     word = &frmline->words[j];
                     srcline = &m_pbuffer->srctext[word->src_text_index];
-                    if (word->flags & LTEXT_WORD_IS_PAD && word->o.baseline ) { // there is some border to draw
+                    if (word->flags & LTEXT_WORD_IS_PAD && (word->o.baseline
+                            || (is_vertical && (measureBorder((ldomNode *) srcline->object, 1) > 0
+                                || measureBorder((ldomNode *) srcline->object, 3) > 0)))) {
                         bool is_right_pad = srcline->o.objflags & LTEXT_OBJECT_IS_PAD_RIGHT;
                         bool is_mirrored = word->flags & LTEXT_WORD_DIRECTION_IS_RTL; // will be drawn as if on the other side
                         ldomNode * node = (ldomNode *) srcline->object;

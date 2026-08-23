@@ -20,6 +20,7 @@
 #include "../include/fb2def.h"
 #include "../include/lvstream.h"
 #include "../include/lvrend.h"   // for -cr-only-if:
+#include "../include/lvlogical.h"
 
 // define to dump all tokens
 //#define DUMP_CSS_PARSING
@@ -86,15 +87,33 @@ enum css_decl_code {
     cssd_min_height,
     cssd_max_width,
     cssd_max_height,
+    cssd_inline_size,
+    cssd_block_size,
+    cssd_min_inline_size,
+    cssd_min_block_size,
+    cssd_max_inline_size,
+    cssd_max_block_size,
     cssd_margin_left,
     cssd_margin_right,
     cssd_margin_top,
     cssd_margin_bottom,
+    cssd_margin_inline_start,
+    cssd_margin_inline_end,
+    cssd_margin_block_start,
+    cssd_margin_block_end,
+    cssd_margin_inline,
+    cssd_margin_block,
     cssd_margin,
     cssd_padding_left,
     cssd_padding_right,
     cssd_padding_top,
     cssd_padding_bottom,
+    cssd_padding_inline_start,
+    cssd_padding_inline_end,
+    cssd_padding_block_start,
+    cssd_padding_block_end,
+    cssd_padding_inline,
+    cssd_padding_block,
     cssd_padding,
     cssd_page_break_before, // Historical, but common, page break properties names
     cssd_page_break_after,
@@ -122,6 +141,12 @@ enum css_decl_code {
     cssd_border_right,
     cssd_border_bottom,
     cssd_border_left,
+    cssd_border_inline_start,
+    cssd_border_inline_end,
+    cssd_border_block_start,
+    cssd_border_block_end,
+    cssd_border_inline,
+    cssd_border_block,
     cssd_background,
     cssd_background_image,
     cssd_background_repeat,
@@ -209,15 +234,33 @@ static const char * css_decl_name[] = {
     "min-height",
     "max-width",
     "max-height",
+    "inline-size",
+    "block-size",
+    "min-inline-size",
+    "min-block-size",
+    "max-inline-size",
+    "max-block-size",
     "margin-left",
     "margin-right",
     "margin-top",
     "margin-bottom",
+    "margin-inline-start",
+    "margin-inline-end",
+    "margin-block-start",
+    "margin-block-end",
+    "margin-inline",
+    "margin-block",
     "margin",
     "padding-left",
     "padding-right",
     "padding-top",
     "padding-bottom",
+    "padding-inline-start",
+    "padding-inline-end",
+    "padding-block-start",
+    "padding-block-end",
+    "padding-inline",
+    "padding-block",
     "padding",
     "page-break-before",
     "page-break-after",
@@ -245,6 +288,12 @@ static const char * css_decl_name[] = {
     "border-right",
     "border-bottom",
     "border-left",
+    "border-inline-start",
+    "border-inline-end",
+    "border-block-start",
+    "border-block-end",
+    "border-inline",
+    "border-block",
     "background",
     "background-image",
     "background-repeat",
@@ -4572,18 +4621,32 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
             case cssd_height:
             case cssd_min_width:
             case cssd_min_height:
+            case cssd_inline_size:
+            case cssd_block_size:
+            case cssd_min_inline_size:
+            case cssd_min_block_size:
                 IF_g_PUSH_LENGTH_AND_break(1, false, css_val_unspecified, css_generic_auto);
             case cssd_max_width:
             case cssd_max_height:
+            case cssd_max_inline_size:
+            case cssd_max_block_size:
                 IF_g_PUSH_LENGTH_AND_break(1, false, css_val_unspecified, css_generic_none);
             case cssd_margin_left:
             case cssd_margin_right:
             case cssd_margin_top:
             case cssd_margin_bottom:
+            case cssd_margin_inline_start:
+            case cssd_margin_inline_end:
+            case cssd_margin_block_start:
+            case cssd_margin_block_end:
             case cssd_padding_left:
             case cssd_padding_right:
             case cssd_padding_top:
             case cssd_padding_bottom:
+            case cssd_padding_inline_start:
+            case cssd_padding_inline_end:
+            case cssd_padding_block_start:
+            case cssd_padding_block_end:
                 IF_g_PUSH_LENGTH_AND_break(1, false, css_val_screen_px, 0);
                 {
                     // borders don't accept length in %
@@ -4594,22 +4657,31 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                     // only margin accepts negative values
                     bool accept_negative = false;
                     if ( prop_code==cssd_margin_bottom || prop_code==cssd_margin_top ||
-                            prop_code==cssd_margin_left || prop_code==cssd_margin_right )
+                            prop_code==cssd_margin_left || prop_code==cssd_margin_right ||
+                            prop_code==cssd_margin_inline_start || prop_code==cssd_margin_inline_end ||
+                            prop_code==cssd_margin_block_start || prop_code==cssd_margin_block_end )
                         accept_negative = true;
                     // only margin, width, height, min-width, min-height accept keyword "auto"
                     // (also accept it with max-width, max-height for style tweaks user sake)
                     bool accept_auto = false;
                     if ( prop_code==cssd_margin_bottom || prop_code==cssd_margin_top ||
                             prop_code==cssd_margin_left || prop_code==cssd_margin_right ||
+                            prop_code==cssd_margin_inline_start || prop_code==cssd_margin_inline_end ||
+                            prop_code==cssd_margin_block_start || prop_code==cssd_margin_block_end ||
                             prop_code==cssd_width || prop_code==cssd_height ||
                             prop_code==cssd_min_width || prop_code==cssd_min_height ||
-                            prop_code==cssd_max_width || prop_code==cssd_max_height )
+                            prop_code==cssd_max_width || prop_code==cssd_max_height ||
+                            prop_code==cssd_inline_size || prop_code==cssd_block_size ||
+                            prop_code==cssd_min_inline_size || prop_code==cssd_min_block_size ||
+                            prop_code==cssd_max_inline_size || prop_code==cssd_max_block_size )
                         accept_auto = true;
                     // only max-width, max-height accept keyword "none"
                     // (also accepts it with min-width, min-height for style tweaks user sake)
                     bool accept_none = false;
                     if ( prop_code==cssd_max_width || prop_code==cssd_max_height ||
-                            prop_code==cssd_min_width || prop_code==cssd_min_height )
+                            prop_code==cssd_min_width || prop_code==cssd_min_height ||
+                            prop_code==cssd_max_inline_size || prop_code==cssd_max_block_size ||
+                            prop_code==cssd_min_inline_size || prop_code==cssd_min_block_size )
                         accept_none = true;
                     // only line-height and letter-spacing accept keyword "normal"
                     bool accept_normal = false;
@@ -4627,7 +4699,10 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                     bool accept_fit_content = false;
                     if ( prop_code==cssd_width || prop_code==cssd_height ||
                             prop_code==cssd_min_width || prop_code==cssd_min_height ||
-                            prop_code==cssd_max_width || prop_code==cssd_max_height )
+                            prop_code==cssd_max_width || prop_code==cssd_max_height ||
+                            prop_code==cssd_inline_size || prop_code==cssd_block_size ||
+                            prop_code==cssd_min_inline_size || prop_code==cssd_min_block_size ||
+                            prop_code==cssd_max_inline_size || prop_code==cssd_max_block_size )
                         accept_fit_content = true;
                     css_length_t len;
                     // -cr-special, only accepted with padding-left and padding-right
@@ -4642,6 +4717,32 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                 }
                 break;
             // Done with those that accept 1 length value.
+
+            // Logical margin/padding shorthands accept one or two length values.
+            case cssd_margin_inline:
+            case cssd_margin_block:
+            case cssd_padding_inline:
+            case cssd_padding_block:
+                IF_g_PUSH_LENGTH_AND_break(2, false, css_val_screen_px, 0);
+                {
+                    bool accept_auto = prop_code == cssd_margin_inline || prop_code == cssd_margin_block;
+                    css_length_t len[2];
+                    int i;
+                    for (i = 0; i < 2; i++) {
+                        if (!parse_number_value( decl, len[i], true, accept_auto, accept_auto ))
+                            break;
+                    }
+                    if (i) {
+                        if (i == 1)
+                            len[1] = len[0];
+                        buf<<(lUInt32) (prop_code | importance | parse_important(decl));
+                        for (i = 0; i < 2; i++) {
+                            buf<<(lUInt32) len[i].type;
+                            buf<<(lUInt32) len[i].value;
+                        }
+                    }
+                }
+                break;
 
             // Next ones accept 1 to 4 length values (with possibly named values for borders
             // that we map to a length)
@@ -4779,6 +4880,12 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
             case cssd_border_right:
             case cssd_border_bottom:
             case cssd_border_left:
+            case cssd_border_inline_start:
+            case cssd_border_inline_end:
+            case cssd_border_block_start:
+            case cssd_border_block_end:
+            case cssd_border_inline:
+            case cssd_border_block:
                 // We don't handle (g>=0) here, to not duplicate the whole logic: we handle it
                 // in the loop below, as if we parsed each inherit or initial values
                 {
@@ -4874,6 +4981,18 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                                 buf<<(lUInt32) color.type;
                                 buf<<(lUInt32) color.value;
                             }
+                        }
+                        else if ( prop_code==cssd_border_inline_start || prop_code==cssd_border_inline_end ||
+                                  prop_code==cssd_border_block_start || prop_code==cssd_border_block_end ||
+                                  prop_code==cssd_border_inline || prop_code==cssd_border_block ) {
+                            // Keep logical side declarations unresolved until cascade time, when the
+                            // element's effective writing-mode (including inheritance) is available.
+                            buf<<(lUInt32) (prop_code | importance | parsed_important);
+                            buf<<(lUInt32) style_val;
+                            buf<<(lUInt32) width.type;
+                            buf<<(lUInt32) width.value;
+                            buf<<(lUInt32) color.type;
+                            buf<<(lUInt32) color.value;
                         }
                         else {
                             css_decl_code prop_style, prop_width, prop_color;
@@ -5709,6 +5828,25 @@ static css_length_t read_length( int * &data )
     return len;
 }
 
+// Logical declarations are resolved while applying a rule.  The current
+// style may still carry the inherited marker, so look through the DOM just as
+// the renderer does before choosing the physical storage side.
+static CSSLogical getLogicalAxes(const css_style_rec_t * style, const ldomNode * node)
+{
+    css_writing_mode_t writing_mode = style->writing_mode;
+    if (writing_mode == css_wm_inherit) {
+        for (const ldomNode * parent = node ? node->getParentNode() : NULL;
+                parent && parent->isElement(); parent = parent->getParentNode()) {
+            css_style_ref_t parent_style = parent->getStyle();
+            if (!parent_style.isNull() && parent_style->writing_mode != css_wm_inherit) {
+                writing_mode = parent_style->writing_mode;
+                break;
+            }
+        }
+    }
+    return CSSLogical(writing_mode);
+}
+
 void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) const
 {
     if (!_data)
@@ -5874,6 +6012,39 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
         case cssd_max_height:
             style->Apply( read_length(p), &style->max_height, imp_bit_max_height, is_important );
             break;
+        case cssd_inline_size:
+        case cssd_block_size:
+        case cssd_min_inline_size:
+        case cssd_min_block_size:
+        case cssd_max_inline_size:
+        case cssd_max_block_size:
+            {
+                // crengine's layout dimensions are already logical: width is
+                // the formatter's inline available size and height is its
+                // block available size.  The vertical renderer performs the
+                // one physical-axis transform at paint time, so swapping here
+                // would transpose logical sizes twice.
+                bool inline_axis = prop_code == cssd_inline_size
+                    || prop_code == cssd_min_inline_size
+                    || prop_code == cssd_max_inline_size;
+                bool use_height = !inline_axis;
+                css_length_t *target;
+                css_style_rec_important_bit bit;
+                if (prop_code == cssd_inline_size || prop_code == cssd_block_size) {
+                    target = use_height ? &style->height : &style->width;
+                    bit = use_height ? imp_bit_height : imp_bit_width;
+                }
+                else if (prop_code == cssd_min_inline_size || prop_code == cssd_min_block_size) {
+                    target = use_height ? &style->min_height : &style->min_width;
+                    bit = use_height ? imp_bit_min_height : imp_bit_min_width;
+                }
+                else {
+                    target = use_height ? &style->max_height : &style->max_width;
+                    bit = use_height ? imp_bit_max_height : imp_bit_max_width;
+                }
+                style->Apply(read_length(p), target, bit, is_important);
+            }
+            break;
         case cssd_margin_left:
             style->Apply( read_length(p), &style->margin[0], imp_bit_margin_left, is_important );
             break;
@@ -5885,6 +6056,57 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
             break;
         case cssd_margin_bottom:
             style->Apply( read_length(p), &style->margin[3], imp_bit_margin_bottom, is_important );
+            break;
+        case cssd_margin_inline_start:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.marIS();
+                style->Apply( read_length(p), &style->margin[side],
+                        side == 0 ? imp_bit_margin_left : side == 1 ? imp_bit_margin_right :
+                        side == 2 ? imp_bit_margin_top : imp_bit_margin_bottom, is_important );
+            }
+            break;
+        case cssd_margin_inline_end:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.marIE();
+                style->Apply( read_length(p), &style->margin[side],
+                        side == 0 ? imp_bit_margin_left : side == 1 ? imp_bit_margin_right :
+                        side == 2 ? imp_bit_margin_top : imp_bit_margin_bottom, is_important );
+            }
+            break;
+        case cssd_margin_block_start:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.marBS();
+                style->Apply( read_length(p), &style->margin[side],
+                        side == 0 ? imp_bit_margin_left : side == 1 ? imp_bit_margin_right :
+                        side == 2 ? imp_bit_margin_top : imp_bit_margin_bottom, is_important );
+            }
+            break;
+        case cssd_margin_block_end:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.marBE();
+                style->Apply( read_length(p), &style->margin[side],
+                        side == 0 ? imp_bit_margin_left : side == 1 ? imp_bit_margin_right :
+                        side == 2 ? imp_bit_margin_top : imp_bit_margin_bottom, is_important );
+            }
+            break;
+        case cssd_margin_inline:
+        case cssd_margin_block:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int first = prop_code == cssd_margin_inline ? logical.marIS() : logical.marBS();
+                int second = prop_code == cssd_margin_inline ? logical.marIE() : logical.marBE();
+                css_length_t len[2] = { read_length(p), read_length(p) };
+                for (int i = 0; i < 2; i++) {
+                    int side = i == 0 ? first : second;
+                    style->Apply( len[i], &style->margin[side],
+                            side == 0 ? imp_bit_margin_left : side == 1 ? imp_bit_margin_right :
+                            side == 2 ? imp_bit_margin_top : imp_bit_margin_bottom, is_important );
+                }
+            }
             break;
         case cssd_margin:
             style->Apply( read_length(p), &style->margin[2], imp_bit_margin_top, is_important );
@@ -5904,11 +6126,103 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
         case cssd_padding_bottom:
             style->Apply( read_length(p), &style->padding[3], imp_bit_padding_bottom, is_important );
             break;
+        case cssd_padding_inline_start:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.padIS();
+                style->Apply( read_length(p), &style->padding[side],
+                        side == 0 ? imp_bit_padding_left : side == 1 ? imp_bit_padding_right :
+                        side == 2 ? imp_bit_padding_top : imp_bit_padding_bottom, is_important );
+            }
+            break;
+        case cssd_padding_inline_end:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.padIE();
+                style->Apply( read_length(p), &style->padding[side],
+                        side == 0 ? imp_bit_padding_left : side == 1 ? imp_bit_padding_right :
+                        side == 2 ? imp_bit_padding_top : imp_bit_padding_bottom, is_important );
+            }
+            break;
+        case cssd_padding_block_start:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.padBS();
+                style->Apply( read_length(p), &style->padding[side],
+                        side == 0 ? imp_bit_padding_left : side == 1 ? imp_bit_padding_right :
+                        side == 2 ? imp_bit_padding_top : imp_bit_padding_bottom, is_important );
+            }
+            break;
+        case cssd_padding_block_end:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int side = logical.padBE();
+                style->Apply( read_length(p), &style->padding[side],
+                        side == 0 ? imp_bit_padding_left : side == 1 ? imp_bit_padding_right :
+                        side == 2 ? imp_bit_padding_top : imp_bit_padding_bottom, is_important );
+            }
+            break;
+        case cssd_padding_inline:
+        case cssd_padding_block:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int first = prop_code == cssd_padding_inline ? logical.padIS() : logical.padBS();
+                int second = prop_code == cssd_padding_inline ? logical.padIE() : logical.padBE();
+                css_length_t len[2] = { read_length(p), read_length(p) };
+                for (int i = 0; i < 2; i++) {
+                    int side = i == 0 ? first : second;
+                    style->Apply( len[i], &style->padding[side],
+                            side == 0 ? imp_bit_padding_left : side == 1 ? imp_bit_padding_right :
+                            side == 2 ? imp_bit_padding_top : imp_bit_padding_bottom, is_important );
+                }
+            }
+            break;
         case cssd_padding:
             style->Apply( read_length(p), &style->padding[2], imp_bit_padding_top, is_important );
             style->Apply( read_length(p), &style->padding[1], imp_bit_padding_right, is_important );
             style->Apply( read_length(p), &style->padding[3], imp_bit_padding_bottom, is_important );
             style->Apply( read_length(p), &style->padding[0], imp_bit_padding_left, is_important );
+            break;
+        case cssd_border_inline_start:
+        case cssd_border_inline_end:
+        case cssd_border_block_start:
+        case cssd_border_block_end:
+        case cssd_border_inline:
+        case cssd_border_block:
+            {
+                CSSLogical logical = getLogicalAxes(style, node);
+                int sides[2];
+                int count = 1;
+                if (prop_code == cssd_border_inline) {
+                    sides[0] = logical.brdIS(); sides[1] = logical.brdIE(); count = 2;
+                }
+                else if (prop_code == cssd_border_block) {
+                    sides[0] = logical.brdBS(); sides[1] = logical.brdBE(); count = 2;
+                }
+                else {
+                    sides[0] = prop_code == cssd_border_inline_start ? logical.brdIS() :
+                               prop_code == cssd_border_inline_end ? logical.brdIE() :
+                               prop_code == cssd_border_block_start ? logical.brdBS() : logical.brdBE();
+                }
+                css_border_style_type_t border_style = (css_border_style_type_t) *p++;
+                css_length_t border_width = read_length(p);
+                css_length_t border_color = read_length(p);
+                for (int i = 0; i < count; i++) {
+                    int side = sides[i];
+                    css_style_rec_important_bit width_bit = side == 0 ? imp_bit_border_width_top : side == 1 ? imp_bit_border_width_right :
+                                    side == 2 ? imp_bit_border_width_bottom : imp_bit_border_width_left;
+                    css_style_rec_important_bit color_bit = side == 0 ? imp_bit_border_color_top : side == 1 ? imp_bit_border_color_right :
+                                    side == 2 ? imp_bit_border_color_bottom : imp_bit_border_color_left;
+                    css_style_rec_important_bit style_bit = side == 0 ? imp_bit_border_style_top : side == 1 ? imp_bit_border_style_right :
+                                    side == 2 ? imp_bit_border_style_bottom : imp_bit_border_style_left;
+                    style->Apply(border_style,
+                                  side == 0 ? &style->border_style_top : side == 1 ? &style->border_style_right :
+                                  side == 2 ? &style->border_style_bottom : &style->border_style_left,
+                                  style_bit, is_important);
+                    style->Apply(border_width, &style->border_width[side], width_bit, is_important);
+                    style->Apply(border_color, &style->border_color[side], color_bit, is_important);
+                }
+            }
             break;
         case cssd_border_top_color:
             style->Apply( read_length(p), &style->border_color[0], imp_bit_border_color_top, is_important );

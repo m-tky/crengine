@@ -73,6 +73,22 @@ static int resolveEffectiveWritingMode(ldomNode *enode)
     return writing_mode;
 }
 
+// A document-wide vertical flow can be selected from another spine item's
+// writing-mode declaration. In that case a later XHTML body may legitimately
+// keep `writing-mode: inherit` on every DOM node, even though the current page
+// is laid out and painted vertically. DrawDocument receives that resolved page
+// mode through draw_extra_info; use it only when the DOM has no local answer.
+static int resolveEffectiveDrawWritingMode(ldomNode *enode, LVDrawBuf &drawbuf)
+{
+    int writing_mode = resolveEffectiveWritingMode(enode);
+    if (writing_mode != css_wm_inherit)
+        return writing_mode;
+    draw_extra_info_t *extra = (draw_extra_info_t *)drawbuf.GetDrawExtraInfo();
+    if (extra && extra->writing_mode != css_wm_inherit)
+        return extra->writing_mode;
+    return writing_mode;
+}
+
 // FORK (vertical-rl): vertical box sizing diagnostics and image page-split
 // helpers. Keep these helpers local and fork-prefixed so upstream merges see
 // small call-site changes instead of scattered condition details.
@@ -248,6 +264,9 @@ public:
     // char halign; // not used
     char valign;
     ldomNode * elem;
+    // border-collapse builds all winners before writing styles back, so a
+    // later cell can still inspect an adjacent cell's original opposite edge.
+    css_style_ref_t collapsed_style;
     CCRTableCell() : col(NULL), row(NULL)
     , direction(REND_DIRECTION_UNSET)
     , width(0)
@@ -365,36 +384,59 @@ int StrToIntPercent( const lChar32 * s, int digitwidth )
     return n;
 }
 
-// Utility function used in CCRTable::PlaceCells() when border_collapse.
-// border_id is the border index: 0=top, 1=right, 2=bottom, 3=left.
-// Update provided target_style and current_target_size.
-// We don't implement fully the rules describe in:
-//   https://www.w3.org/TR/CSS21/tables.html#border-conflict-resolution
-//
-// With use_neighbour_if_equal=true, neighbour border wins if its width
-// is equal to target width.
-// We would have intuitively set it to true, for a TABLE or TR border
-// color to be used even if border width is the same as the TD one. But
-// the above url rules state: "If border styles differ only in color,
-// then a style set on a cell wins over one on a row, which wins over
-// a row group, column, column group and, lastly, table."
-void collapse_border(css_style_ref_t & target_style, int & current_target_size,
-    int border_id, ldomNode * neighbour_node, bool use_neighbour_if_equal=false) {
-    if (neighbour_node) {
-        int neighbour_size = measureBorder(neighbour_node, border_id);
-        if ( neighbour_size > current_target_size ||
-                (use_neighbour_if_equal && neighbour_size == current_target_size) ) {
-            css_style_ref_t neighbour_style = neighbour_node->getStyle();
-            switch (border_id) {
-                case 0: target_style->border_style_top = neighbour_style->border_style_top; break;
-                case 1: target_style->border_style_right = neighbour_style->border_style_right; break;
-                case 2: target_style->border_style_bottom = neighbour_style->border_style_bottom; break;
-                case 3: target_style->border_style_left = neighbour_style->border_style_left; break;
-            }
-            target_style->border_width[border_id] = neighbour_style->border_width[border_id];
-            target_style->border_color[border_id] = neighbour_style->border_color[border_id];
-            current_target_size = neighbour_size;
-        }
+// Utility function used in CCRTable::PlaceCells() when border-collapse.
+// CSS 2.1 resolves a shared edge by first honouring hidden, then its width,
+// then the table-structure owner (cell > row > rowgroup > column > colgroup
+// > table).  We intentionally stop there: style/source-order tie breaking is
+// cosmetic and must not make an edge disappear or get painted twice.
+static css_border_style_type_t getBorderStyle(const css_style_ref_t & style, int border_id)
+{
+    switch (border_id) {
+        case 0: return style->border_style_top;
+        case 1: return style->border_style_right;
+        case 2: return style->border_style_bottom;
+        default: return style->border_style_left;
+    }
+}
+
+static void setCollapsedBorder(css_style_ref_t & target, int border_id,
+                               const css_style_ref_t & source, int source_border_id)
+{
+    switch (border_id) {
+        case 0: target->border_style_top = getBorderStyle(source, source_border_id); break;
+        case 1: target->border_style_right = getBorderStyle(source, source_border_id); break;
+        case 2: target->border_style_bottom = getBorderStyle(source, source_border_id); break;
+        default: target->border_style_left = getBorderStyle(source, source_border_id); break;
+    }
+    target->border_width[border_id] = source->border_width[source_border_id];
+    target->border_color[border_id] = source->border_color[source_border_id];
+}
+
+static void collapse_border(css_style_ref_t & target_style, int & current_size,
+                            int & current_rank, int border_id,
+                            ldomNode * candidate_node, int candidate_border_id,
+                            int candidate_rank)
+{
+    if (!candidate_node)
+        return;
+    css_style_ref_t candidate = candidate_node->getStyle();
+    css_border_style_type_t candidate_style = getBorderStyle(candidate, candidate_border_id);
+    css_border_style_type_t current_style = getBorderStyle(target_style, border_id);
+    if (candidate_style == css_border_hidden) {
+        // hidden suppresses every competing border, including a wider cell edge.
+        setCollapsedBorder(target_style, border_id, candidate, candidate_border_id);
+        current_size = 0;
+        current_rank = candidate_rank;
+        return;
+    }
+    if (current_style == css_border_hidden || candidate_style < css_border_solid)
+        return;
+    int candidate_size = measureBorder(candidate_node, candidate_border_id);
+    if (candidate_size > current_size ||
+            (candidate_size == current_size && candidate_rank > current_rank)) {
+        setCollapsedBorder(target_style, border_id, candidate, candidate_border_id);
+        current_size = candidate_size;
+        current_rank = candidate_rank;
     }
 }
 
@@ -410,6 +452,11 @@ public:
     bool enhanced_rendering;
     bool is_ruby_table;
     bool rows_rendering_reordered;
+    // Table coordinates are logical: col x/width is inline and row
+    // y/height is block.  Keep the effective mode once so all CSS box
+    // consumption uses the same axis mapping; painting performs the sole
+    // vertical coordinate transform later in DrawDocument().
+    css_writing_mode_t writing_mode;
     ldomNode * elem;
     ldomNode * caption;
     int caption_h;
@@ -916,11 +963,25 @@ public:
 
         css_style_ref_t table_style = elem->getStyle();
         // border-spacing does not accept values in % unit
-        int borderspacing_h = lengthToPx(elem, table_style->border_spacing[0], 0 );
+        CSSLogical table_axes(writing_mode);
+        int inline_spacing_index = table_axes.isVertical() ? 1 : 0;
+        int borderspacing_h = lengthToPx(elem, table_style->border_spacing[inline_spacing_index], 0 );
         bool border_collapse = (table_style->border_collapse == css_border_c_collapse);
 
         if (border_collapse) {
             borderspacing_h = 0; // no border spacing when table collapse
+            const int border_block_start = table_axes.brdBS();
+            const int border_block_end = table_axes.brdBE();
+            const int border_inline_start = table_axes.brdIS();
+            const int border_inline_end = table_axes.brdIE();
+            auto remove_border = [](css_style_ref_t & target, int side) {
+                switch (side) {
+                    case 0: target->border_style_top = css_border_none; break;
+                    case 1: target->border_style_right = css_border_none; break;
+                    case 2: target->border_style_bottom = css_border_none; break;
+                    case 3: target->border_style_left = css_border_none; break;
+                }
+            };
             // Each cell is responsible for drawing its borders.
             for (i=0; i<rows.length(); i++) {
                 for (j=0; j<rows[i]->cells.length(); j++) {
@@ -947,10 +1008,14 @@ public:
                     bool is_at_right = (cell->col->index + cell->colspan) == cols.length();
                     // We'll avoid calling measureBorder() many times for this same cell,
                     // by passing these by reference to collapse_border():
-                    int cell_border_top = measureBorder(cell->elem, 0);
-                    int cell_border_right = measureBorder(cell->elem, 1);
-                    int cell_border_bottom = measureBorder(cell->elem, 2);
-                    int cell_border_left = measureBorder(cell->elem, 3);
+                    int cell_border_top = measureBorder(cell->elem, border_block_start);
+                    int cell_border_right = measureBorder(cell->elem, border_inline_end);
+                    int cell_border_bottom = measureBorder(cell->elem, border_block_end);
+                    int cell_border_left = measureBorder(cell->elem, border_inline_start);
+                    int border_top_rank = 6;    // cell
+                    int border_right_rank = 6;
+                    int border_bottom_rank = 6;
+                    int border_left_rank = 6;
                     //
                     // With border-collapse, a cell may get its top and bottom
                     // borders from its TR.
@@ -960,14 +1025,14 @@ public:
                     // from its own starting row, or the other row it happens to end on.
                     // Should look cleaner if we use the later.
                     ldomNode * rbottom = rows[cell->row->index + cell->rowspan - 1]->elem;
-                    collapse_border(newstyle, cell_border_top, 0, rtop);
-                    collapse_border(newstyle, cell_border_bottom, 2, rbottom);
+                    collapse_border(newstyle, cell_border_top, border_top_rank, border_block_start, rtop, border_block_start, 5);
+                    collapse_border(newstyle, cell_border_bottom, border_bottom_rank, border_block_end, rbottom, border_block_end, 5);
                     // We also get the left and right borders, for the first or
                     // the last cell in a row, from the row (top row if multi rows span)
                     if (is_at_left)
-                        collapse_border(newstyle, cell_border_left, 3, rtop);
+                        collapse_border(newstyle, cell_border_left, border_left_rank, border_inline_start, rtop, border_inline_start, 5);
                     if (is_at_right)
-                        collapse_border(newstyle, cell_border_right, 1, rtop);
+                        collapse_border(newstyle, cell_border_right, border_right_rank, border_inline_end, rtop, border_inline_end, 5);
                         // If a row is missing some cells, there is none that stick
                         // to the right of the table (is_at_right is false): the outer
                         // table border will have a hole for this row...
@@ -976,23 +1041,70 @@ public:
                     if (rows[cell->row->index]->rowgroup) {
                         CCRTableRowGroup * grp = rows[cell->row->index]->rowgroup;
                         if (rows[cell->row->index] == grp->rows.first())
-                            collapse_border(newstyle, cell_border_top, 0, grp->elem);
+                            collapse_border(newstyle, cell_border_top, border_top_rank, border_block_start, grp->elem, border_block_start, 4);
                         if (rows[cell->row->index] == grp->rows.last())
-                            collapse_border(newstyle, cell_border_bottom, 2, grp->elem);
+                            collapse_border(newstyle, cell_border_bottom, border_bottom_rank, border_block_end, grp->elem, border_block_end, 4);
                         if (is_at_left)
-                            collapse_border(newstyle, cell_border_left, 3, grp->elem);
+                            collapse_border(newstyle, cell_border_left, border_left_rank, border_inline_start, grp->elem, border_inline_start, 4);
                         if (is_at_right)
-                            collapse_border(newstyle, cell_border_right, 1, grp->elem);
+                            collapse_border(newstyle, cell_border_right, border_right_rank, border_inline_end, grp->elem, border_inline_end, 4);
+                    }
+                    // Column and column-group candidates own the inline edges.
+                    // The group is the physical parent of a <col> node.
+                    if (cell->col->elem) {
+                        if (is_at_left)
+                            collapse_border(newstyle, cell_border_left, border_left_rank, border_inline_start, cell->col->elem, border_inline_start, 3);
+                        if (is_at_right)
+                            collapse_border(newstyle, cell_border_right, border_right_rank, border_inline_end, cell->col->elem, border_inline_end, 3);
+                        ldomNode * colgroup = cell->col->elem->getParentNode();
+                        if (colgroup && colgroup->getRendMethod() == erm_table_column_group) {
+                            if (is_at_left)
+                                collapse_border(newstyle, cell_border_left, border_left_rank, border_inline_start, colgroup, border_inline_start, 2);
+                            if (is_at_right)
+                                collapse_border(newstyle, cell_border_right, border_right_rank, border_inline_end, colgroup, border_inline_end, 2);
+                        }
                     }
                     // And we may finally get borders from the table itself ("elem")
                     if (is_at_top)
-                        collapse_border(newstyle, cell_border_top, 0, elem);
+                        collapse_border(newstyle, cell_border_top, border_top_rank, border_block_start, elem, border_block_start, 1);
                     if (is_at_bottom)
-                        collapse_border(newstyle, cell_border_bottom, 2, elem);
+                        collapse_border(newstyle, cell_border_bottom, border_bottom_rank, border_block_end, elem, border_block_end, 1);
                     if (is_at_left)
-                        collapse_border(newstyle, cell_border_left, 3, elem);
+                        collapse_border(newstyle, cell_border_left, border_left_rank, border_inline_start, elem, border_inline_start, 1);
                     if (is_at_right)
-                        collapse_border(newstyle, cell_border_right, 1, elem);
+                        collapse_border(newstyle, cell_border_right, border_right_rank, border_inline_end, elem, border_inline_end, 1);
+
+                    // Internal shared edges are painted by their logical-start
+                    // cell (IS/BS).  Compare it with every adjacent opposite
+                    // edge before suppressing the predecessor's IE/BE style;
+                    // this also covers rowspan/colspan boundaries.
+                    int cell_col_start = cell->col->index;
+                    int cell_col_end = cell_col_start + cell->colspan;
+                    int cell_row_start = cell->row->index;
+                    int cell_row_end = cell_row_start + cell->rowspan;
+                    for (int ni = 0; ni < rows.length(); ni++) {
+                        for (int nj = 0; nj < rows[ni]->cells.length(); nj++) {
+                            CCRTableCell * neighbour = rows[ni]->cells[nj];
+                            if (!neighbour->elem || neighbour == cell)
+                                continue;
+                            int neighbour_col_start = neighbour->col->index;
+                            int neighbour_col_end = neighbour_col_start + neighbour->colspan;
+                            int neighbour_row_start = neighbour->row->index;
+                            int neighbour_row_end = neighbour_row_start + neighbour->rowspan;
+                            if (neighbour_col_end == cell_col_start
+                                    && neighbour_row_start < cell_row_end
+                                    && neighbour_row_end > cell_row_start) {
+                                collapse_border(newstyle, cell_border_left, border_left_rank,
+                                    border_inline_start, neighbour->elem, border_inline_end, 6);
+                            }
+                            if (neighbour_row_end == cell_row_start
+                                    && neighbour_col_start < cell_col_end
+                                    && neighbour_col_end > cell_col_start) {
+                                collapse_border(newstyle, cell_border_top, border_top_rank,
+                                    border_block_start, neighbour->elem, border_block_end, 6);
+                            }
+                        }
+                    }
 
                     // Now, we should disable some borders for this cell,
                     // at inter-cell boundaries.
@@ -1008,17 +1120,24 @@ public:
                     // the table, as these will draw the outer table border
                     // on these sides.
                     if ( !is_at_right )
-                        newstyle->border_style_right = css_border_none;
+                        remove_border(newstyle, border_inline_end);
                     if ( !is_at_bottom )
-                        newstyle->border_style_bottom = css_border_none;
+                        remove_border(newstyle, border_block_end);
 
-                    cell->elem->setStyle(newstyle);
-                    // (Note: we should no more modify a style after it has been
-                    // applied to a node with setStyle().)
+                    cell->collapsed_style = newstyle;
                 }
-                // (Some optimisation could be made in these loops, as
+            // (Some optimisation could be made in these loops, as
                 // collapse_border() currently calls measureBorder() many
                 // times for the same elements: TR, TBODY, TABLE...)
+            }
+            // All comparisons above must see original cell styles: write the
+            // resolved copies only after every edge has selected its winner.
+            for (i=0; i<rows.length(); i++) {
+                for (j=0; j<rows[i]->cells.length(); j++) {
+                    CCRTableCell * cell = rows[i]->cells[j];
+                    if (cell->elem && !cell->collapsed_style.isNull())
+                        cell->elem->setStyle(cell->collapsed_style);
+                }
             }
             // The TR and TFOOT borders will explicitely NOT be drawn by DrawDocument()
             // (Firefox never draws them, even when no border-collapse).
@@ -1159,16 +1278,16 @@ public:
         /////////////////////////// From here until further noticed, we just use and update the cols objects
         // Find width available for cells content (including their borders and paddings)
         // Get widths used by the table itself
-        int table_outer_borders_width = measureBorder(elem,1) + measureBorder(elem,3); // (border indexes are TRBL)
+        int table_outer_borders_width = measureBorder(elem, table_axes.brdIS())
+            + measureBorder(elem, table_axes.brdIE());
         int table_paddings_width = 0;
         int table_borderspacings_width = 0;
         if ( border_collapse ) {
             // Table own outer paddings and any border-spacing are ignored with border-collapse
         }
         else { // no collapse
-            table_paddings_width = lengthToPx(elem, table_style->padding[0], table_width)
-                                 + lengthToPx(elem, table_style->padding[1], table_width);
-                                    // (margin and padding indexes are LRTB)
+            table_paddings_width = lengthToPx(elem, table_style->padding[table_axes.padIS()], table_width)
+                                 + lengthToPx(elem, table_style->padding[table_axes.padIE()], table_width);
             // (nb cols + 1) border-spacing
             table_borderspacings_width = (cols.length() + 1) * borderspacing_h;
         }
@@ -1391,8 +1510,8 @@ public:
             table_width -= restw;
             table_paddings_width = 0;
             if ( !border_collapse ) { // padding were not applied when border-collapse
-                table_paddings_width = lengthToPx(elem, table_style->padding[0], table_width)
-                                     + lengthToPx(elem, table_style->padding[1], table_width);
+                table_paddings_width = lengthToPx(elem, table_style->padding[table_axes.padIS()], table_width)
+                                     + lengthToPx(elem, table_style->padding[table_axes.padIE()], table_width);
             }
             int correction = old_table_paddings_width - table_paddings_width;
             table_width -= correction;
@@ -1423,8 +1542,8 @@ public:
                 table_width = table_min_width;
                 table_paddings_width = 0;
                 if ( !border_collapse ) { // padding were not applied when border-collapse
-                    table_paddings_width += lengthToPx(elem, table_style->padding[0], table_width);
-                    table_paddings_width += lengthToPx(elem, table_style->padding[1], table_width);
+                    table_paddings_width += lengthToPx(elem, table_style->padding[table_axes.padIS()], table_width);
+                    table_paddings_width += lengthToPx(elem, table_style->padding[table_axes.padIE()], table_width);
                 }
                 assignable_width = table_width - table_outer_borders_width - table_paddings_width - table_borderspacings_width;
                 restw = assignable_width - min_needed_width;
@@ -1540,15 +1659,17 @@ public:
         // its RenderRectAccessor fmt(node) x/y/w/h.
         // x/y of a cell are relative to its own parent node top left corner
         css_style_ref_t table_style = elem->getStyle();
-        int table_border_top = measureBorder(elem, 0);
-        int table_border_right = measureBorder(elem, 1);
-        int table_border_bottom = measureBorder(elem, 2);
-        int table_border_left = measureBorder(elem, 3);
-        int table_padding_left = lengthToPx(elem, table_style->padding[0], table_width);
-        int table_padding_right = lengthToPx(elem, table_style->padding[1], table_width);
-        int table_padding_top = lengthToPx(elem, table_style->padding[2], table_width);
-        int table_padding_bottom = lengthToPx(elem, table_style->padding[3], table_width);
-        int borderspacing_v = lengthToPx(elem, table_style->border_spacing[1], 0);
+        CSSLogical table_axes(writing_mode);
+        int table_border_top = measureBorder(elem, table_axes.brdBS());
+        int table_border_right = measureBorder(elem, table_axes.brdIE());
+        int table_border_bottom = measureBorder(elem, table_axes.brdBE());
+        int table_border_left = measureBorder(elem, table_axes.brdIS());
+        int table_padding_left = lengthToPx(elem, table_style->padding[table_axes.padIS()], table_width);
+        int table_padding_right = lengthToPx(elem, table_style->padding[table_axes.padIE()], table_width);
+        int table_padding_top = lengthToPx(elem, table_style->padding[table_axes.padBS()], table_width);
+        int table_padding_bottom = lengthToPx(elem, table_style->padding[table_axes.padBE()], table_width);
+        int block_spacing_index = table_axes.isVertical() ? 0 : 1;
+        int borderspacing_v = lengthToPx(elem, table_style->border_spacing[block_spacing_index], 0);
         bool border_collapse = (table_style->border_collapse==css_border_c_collapse);
         if (border_collapse) {
             table_padding_top = 0;
@@ -1604,10 +1725,11 @@ public:
             fmt.setWidth( w ); // fmt.width must be set before 'caption->renderFinalBlock'
                                // to have text-indent in % not mess up at render time
             css_style_ref_t caption_style = caption->getStyle();
-            int padding_left = lengthToPx( caption, caption_style->padding[0], w ) + measureBorder(caption, 3);
-            int padding_right = lengthToPx( caption, caption_style->padding[1], w ) + measureBorder(caption,1);
-            int padding_top = lengthToPx( caption, caption_style->padding[2], w ) + measureBorder(caption,0);
-            int padding_bottom = lengthToPx( caption, caption_style->padding[3], w ) + measureBorder(caption,2);
+            CSSLogical caption_axes((css_writing_mode_t)resolveEffectiveWritingMode(caption));
+            int padding_left = lengthToPx( caption, caption_style->padding[caption_axes.padIS()], w ) + measureBorder(caption, caption_axes.brdIS());
+            int padding_right = lengthToPx( caption, caption_style->padding[caption_axes.padIE()], w ) + measureBorder(caption, caption_axes.brdIE());
+            int padding_top = lengthToPx( caption, caption_style->padding[caption_axes.padBS()], w ) + measureBorder(caption, caption_axes.brdBS());
+            int padding_bottom = lengthToPx( caption, caption_style->padding[caption_axes.padBE()], w ) + measureBorder(caption, caption_axes.brdBE());
             if ( enhanced_rendering ) {
                 // As done in renderBlockElementEnhanced when erm_final
                 fmt.setInnerX( padding_left );
@@ -1750,12 +1872,13 @@ public:
                     if ( cell->elem->getRendMethod() == erm_final ) {
                         LFormattedTextRef txform;
                         css_style_ref_t elem_style = cell->elem->getStyle();
-                        int border_left = measureBorder(cell->elem,3);
-                        int border_right = measureBorder(cell->elem,1);
-                        int padding_left = lengthToPx( cell->elem, elem_style->padding[0], cell->width ) + border_left;
-                        int padding_right = lengthToPx( cell->elem, elem_style->padding[1], cell->width ) + border_right;
-                        int padding_top = lengthToPx( cell->elem, elem_style->padding[2], cell->width ) + measureBorder(cell->elem,0);
-                        int padding_bottom = lengthToPx( cell->elem, elem_style->padding[3], cell->width ) + measureBorder(cell->elem,2);
+                        CSSLogical cell_axes((css_writing_mode_t)resolveEffectiveWritingMode(cell->elem));
+                        int border_left = measureBorder(cell->elem, cell_axes.brdIS());
+                        int border_right = measureBorder(cell->elem, cell_axes.brdIE());
+                        int padding_left = lengthToPx( cell->elem, elem_style->padding[cell_axes.padIS()], cell->width ) + border_left;
+                        int padding_right = lengthToPx( cell->elem, elem_style->padding[cell_axes.padIE()], cell->width ) + border_right;
+                        int padding_top = lengthToPx( cell->elem, elem_style->padding[cell_axes.padBS()], cell->width ) + measureBorder(cell->elem, cell_axes.brdBS());
+                        int padding_bottom = lengthToPx( cell->elem, elem_style->padding[cell_axes.padBE()], cell->width ) + measureBorder(cell->elem, cell_axes.brdBE());
                         // Deal with negative text-indent, as done in renderBlockElementEnhanced when erm_final
                         if ( elem_style->text_indent.value < 0 ) {
                             int indent = - lengthToPx(cell->elem, elem_style->text_indent, cell->width);
@@ -1915,7 +2038,9 @@ public:
                             // We just need to remove this cell bottom padding (we should
                             // not remove the inner content bottom margins or paddings).
                             css_style_ref_t elem_style = cell->elem->getStyle();
-                            int padding_bottom = lengthToPx( cell->elem, elem_style->padding[3], cell->width ) + measureBorder(cell->elem,2);
+                            CSSLogical cell_axes((css_writing_mode_t)resolveEffectiveWritingMode(cell->elem));
+                            int padding_bottom = lengthToPx( cell->elem, elem_style->padding[cell_axes.padBE()], cell->width )
+                                + measureBorder(cell->elem, cell_axes.brdBE());
                             // We'll position that bottom content edge
                             cell->adjusted_baseline = h - padding_bottom;
                         }
@@ -2322,15 +2447,16 @@ public:
                                 fmt.setInnerY( fmt.getInnerY() + pad );
                             }
                             else {
-                                // We need to update the cell element padding-top to include this pad
+                                // We need to update the cell's block-start padding to include this pad.
                                 css_style_ref_t style = cell->elem->getStyle();
                                 css_style_ref_t newstyle(new css_style_rec_t);
                                 copystyle(style, newstyle);
                                 // If padding-top is a percentage, it is relative to
                                 // the *width* of the containing block
-                                int orig_padding_top = lengthToPx( cell->elem, style->padding[2], cell->width );
-                                newstyle->padding[2].type = css_val_screen_px;
-                                newstyle->padding[2].value = orig_padding_top + pad;
+                                CSSLogical cell_axes((css_writing_mode_t)resolveEffectiveWritingMode(cell->elem));
+                                int orig_padding_top = lengthToPx( cell->elem, style->padding[cell_axes.padBS()], cell->width );
+                                newstyle->padding[cell_axes.padBS()].type = css_val_screen_px;
+                                newstyle->padding[cell_axes.padBS()].value = orig_padding_top + pad;
                                 cell->elem->setStyle(newstyle);
                             }
                         } else if ( cell->elem->getRendMethod() != erm_invisible ) { // erm_block
@@ -2420,6 +2546,7 @@ public:
         caption_direction = REND_DIRECTION_UNSET;
         caption_at_bottom = false;
         elem = tbl_elem;
+        writing_mode = (css_writing_mode_t)resolveEffectiveWritingMode(tbl_elem);
         table_width = tbl_width;
         shrink_to_fit = tbl_shrink_to_fit;
         table_min_width = tbl_min_width;
@@ -3525,9 +3652,10 @@ bool renderAsListStylePositionInside( const css_style_ref_t style, bool is_rtl=f
     return false;
 }
 
-static inline bool shouldApplyVerticalRlDefaultInterline( css_style_ref_t style )
+static inline bool shouldApplyVerticalRlDefaultInterline( ldomNode *enode,
+                                                           css_style_ref_t style )
 {
-    return style->writing_mode == css_wm_vertical_rl
+    return resolveEffectiveWritingMode(enode) == css_wm_vertical_rl
         && style->line_height.type == css_val_unspecified
         && style->line_height.value == css_generic_normal;
 }
@@ -3778,7 +3906,7 @@ void renderFinalBlock( ldomNode * enode, LFormattedText * txform, RenderRectAcce
         // not if it was already in screen_px, which means it has already
         // been scaled (in setNodeStyle() when inherited).
         int interline_scale_factor = enode->getDocument()->getInterlineScaleFactor();
-        if ( shouldApplyVerticalRlDefaultInterline(style) ) {
+        if ( shouldApplyVerticalRlDefaultInterline(enode, style) ) {
             // Vertical Japanese text normally needs a wider line pitch than
             // horizontal text.  Apply the fork's vertical default only when
             // the book did not author an explicit line-height.
@@ -4300,17 +4428,26 @@ void renderFinalBlock( ldomNode * enode, LFormattedText * txform, RenderRectAcce
                     flags |= LTEXT_HAS_TOP_BOTTOM_BORDER;
                 }
             }
-            // If this inline node has any left/right margin/border/padding, add a pad object.
-            // Even if it has some on a single side, we need to add a pad on both sides for
-            // any BiDi re-ordering to keep their position correctly (we'll have the pads
-            // appear to BiDi as balanced parentheses, so they are not shuffled around).
-            int margin_left = lengthToPx( enode, style->margin[0], width );
-            int border_left = measureBorder(enode, 3);
-            int padding_left = lengthToPx( enode, style->padding[0], width );
-            int margin_right = lengthToPx( enode, style->margin[1], width );
-            int border_right = measureBorder(enode, 1);
-            int padding_right = lengthToPx( enode, style->padding[1], width );
-            if ( margin_left > 0 || border_left > 0 || padding_left > 0 || margin_right > 0 || border_right > 0 || padding_right > 0 ) {
+            // Pads reserve the inline-axis margin, border and padding.  In a
+            // vertical paragraph that is physical top/bottom, not left/right.
+            // Keep emitting pads for physical left/right borders too: they do
+            // not consume inline advance, but the pad pair supplies the span
+            // used to paint these block-axis borders in vertical layout.
+            // Even if an inset is present on a single side, emit both pads so
+            // BiDi treats them as balanced parentheses and cannot separate
+            // either one from its inline content.
+            CSSLogical L((css_writing_mode_t)resolveEffectiveWritingMode(enode));
+            int margin_start = lengthToPx( enode, style->margin[L.marIS()], width );
+            int border_start = measureBorder(enode, L.brdIS());
+            int padding_start = lengthToPx( enode, style->padding[L.padIS()], width );
+            int margin_end = lengthToPx( enode, style->margin[L.marIE()], width );
+            int border_end = measureBorder(enode, L.brdIE());
+            int padding_end = lengthToPx( enode, style->padding[L.padIE()], width );
+            bool has_vertical_block_border = L.isVertical()
+                && (measureBorder(enode, 3) > 0 || measureBorder(enode, 1) > 0);
+            if ( margin_start > 0 || border_start > 0 || padding_start > 0
+                    || margin_end > 0 || border_end > 0 || padding_end > 0
+                    || has_vertical_block_border ) {
                 txform->AddSourceObject(flags, LTEXT_OBJECT_IS_PAD, line_h, valign_dy, indent, enode, lang_cfg );
                 flags &= ~LTEXT_FLAG_NEWLINE & ~LTEXT_SRC_IS_CLEAR_BOTH; // clear newline flag
                 add_right_pad = true;
@@ -8000,7 +8137,10 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
     // Option C: use CSS logical properties so that padding/margin/border map to
     // the correct inline/block directions in vertical-rl mode.  CSSLogical (lvlogical.h)
     // returns the correct physical array index for each logical role.
-    CSSLogical L(style->writing_mode);
+    // Most EPUB child blocks inherit writing-mode from <body>.  Use the
+    // cascaded mode so their physical box properties are mapped to the same
+    // logical axes as their text and decorations.
+    CSSLogical L((css_writing_mode_t)resolveEffectiveWritingMode(enode));
     int border_left = measureBorder(enode, L.brdIS());
     int border_right = measureBorder(enode, L.brdIE());
     int padding_left   = lengthToPx( enode, style->padding[L.padIS()], container_width ) + border_left + DEBUG_TREE_DRAW;
@@ -8263,26 +8403,27 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         }
         // (We could do the same fot height if in %, but it looks like Firefox
         // just ignore floats height in %, so let's ignore them too.)
+        CSSLogical child_axes((css_writing_mode_t)resolveEffectiveWritingMode(child));
         if ( ! BLOCK_RENDERING(flags, ALLOW_HORIZONTAL_BLOCK_OVERFLOW) ) {
             // Simplest way to avoid a float overflowing its floatBox is to
             // ensure no negative margins
-            int child_margin_left   = lengthToPx( child, child_style->margin[0], container_width );
-            int child_margin_right  = lengthToPx( child, child_style->margin[1], container_width );
+            int child_margin_left   = lengthToPx( child, child_style->margin[child_axes.marIS()], container_width );
+            int child_margin_right  = lengthToPx( child, child_style->margin[child_axes.marIE()], container_width );
             if ( child_margin_left < 0 ) {
                 if (!style_changed) {
                     copystyle(child_style, newstyle);
                     style_changed = true;
                 }
-                newstyle->margin[0].type = css_val_screen_px;
-                newstyle->margin[0].value = 0;
+                newstyle->margin[child_axes.marIS()].type = css_val_screen_px;
+                newstyle->margin[child_axes.marIS()].value = 0;
             }
             if ( child_margin_right < 0 ) {
                 if (!style_changed) {
                     copystyle(child_style, newstyle);
                     style_changed = true;
                 }
-                newstyle->margin[1].type = css_val_screen_px;
-                newstyle->margin[1].value = 0;
+                newstyle->margin[child_axes.marIE()].type = css_val_screen_px;
+                newstyle->margin[child_axes.marIE()].value = 0;
             }
         }
         // Save child styles if we updated them
@@ -8294,8 +8435,8 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         // The margins of the element with float: are related to our container_width,
         // so account for them here, and don't let getRenderedWidths() add them (or they
         // would be reverse-computed from the inner content)
-        int child_margin_left   = lengthToPx( child, child_style->margin[0], container_width );
-        int child_margin_right  = lengthToPx( child, child_style->margin[1], container_width );
+        int child_margin_left   = lengthToPx( child, child_style->margin[child_axes.marIS()], container_width );
+        int child_margin_right  = lengthToPx( child, child_style->margin[child_axes.marIE()], container_width );
         int child_margins = child_margin_left + child_margin_right;
         // A floatBox does not have any margin/padding/border itself, but we
         // may add some border with CSS for debugging, so account for any
@@ -9921,17 +10062,27 @@ static int getVerticalInlineEndPadding(ldomNode *enode, RenderRectAccessor fmt)
     return padding_end > 0 ? padding_end : 0;
 }
 
-// A vertical block's layout width is its initially allocated inline size.  It
-// is not always the size of the box that gets painted: an auto-sized block may
-// extend it to contain descendants that use more inline space.  That used size
-// is kept separately so layout can retain the allocated width while all box
-// decorations (backgrounds and borders) share the same painted rectangle.
-static int getVerticalPaintedInlineSize(RenderRectAccessor fmt)
+// In vertical layout, RenderRectAccessor::width is the block-flow allocation
+// (screen width), while the inline extent is the page height used by the text
+// formatter.  For an auto-height block, CSS therefore makes its background
+// and borders span that inline extent.  Using fmt.width here made a centered
+// heading use the page height while its enclosing rectangle stopped at the
+// page width.
+static int getVerticalPaintedInlineSize(ldomNode *enode, RenderRectAccessor fmt,
+                                        int doc_x)
 {
     if ( RENDER_RECT_HAS_FLAG(fmt, VERTICAL_USED_INLINE_SIZE_SET) ) {
         int used_inline_size = fmt.getVerticalUsedInlineSize();
         if ( used_inline_size > 0 )
             return used_inline_size;
+    }
+    css_style_ref_t style = enode->getStyle();
+    if ( style->height.type == css_val_unspecified
+            && style->height.value == css_generic_auto ) {
+        int page_height = enode->getDocument()->getPageHeight();
+        int remaining_inline_size = page_height - doc_x;
+        if ( remaining_inline_size > 0 )
+            return remaining_inline_size;
     }
     return fmt.getWidth();
 }
@@ -9995,7 +10146,7 @@ static void DrawBorderVertical(ldomNode *enode, LVDrawBuf & drawbuf,
     // The layout box supplies the block-direction extent.  Its separately
     // tracked used inline extent supplies the screen height, so the border
     // encloses the same rectangle as the background.
-    int screen_height = getVerticalPaintedInlineSize(fmt); // doc-X extent -> screen height
+    int screen_height = getVerticalPaintedInlineSize(enode, fmt, doc_x); // doc-X extent -> screen height
     int screen_width = fmt.getHeight();  // doc-Y extent -> screen width
     int screen_top    = x0 + doc_x;
     int screen_bottom = screen_top + screen_height;
@@ -10027,7 +10178,7 @@ static void DrawBackgroundColorVertical(LVDrawBuf & drawbuf, ldomNode *enode,
     draw_extra_info_t * dei = (draw_extra_info_t*)drawbuf.GetDrawExtraInfo();
     int anchor = (dei && dei->vert_column_clip_right) ? dei->vert_column_clip_right : clip.right;
 
-    int screen_height = getVerticalPaintedInlineSize(fmt); // doc-X extent -> screen height
+    int screen_height = getVerticalPaintedInlineSize(enode, fmt, doc_x); // doc-X extent -> screen height
     if ( shouldDebugForkVerticalBoxNode(enode) ) {
         fprintf(stderr,
             "KO_DEBUG_VERT_BG draw path=%s class=%s fmt_width=%d draw_width=%d fmt_height=%d "
@@ -10055,7 +10206,10 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
     css_style_ref_t style = enode->getStyle();
     // FORK (vertical-rl): borders need the Y=X swap+mirror; handle separately
     // so the upstream physical-edge drawing below stays untouched.
-    if ( css_wm_is_vertical(style->writing_mode) ) {
+    // Child elements normally inherit writing-mode from <body>, so their own
+    // style record keeps css_wm_inherit.  Dispatching on that record made
+    // borders in vertical EPUB sections take the horizontal paint path.
+    if ( css_wm_is_vertical(resolveEffectiveDrawWritingMode(enode, drawbuf)) ) {
         DrawBorderVertical(enode, drawbuf, x0, y0, doc_x, doc_y, fmt);
         return;
     }
@@ -10556,9 +10710,16 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
         // FORK (vertical-rl): regular element background images need the same
         // doc-X/doc-Y to screen-Y/screen-X mapping as borders and background
         // colors. Keep body/canvas background drawing on the legacy path.
-        bool draw_vertical = clip_to_target && css_wm_is_vertical(style->writing_mode);
+        // As with borders, background images on descendants must use their
+        // inherited writing mode, not just an explicitly declared value.
+        bool draw_vertical = clip_to_target
+            && css_wm_is_vertical(resolveEffectiveDrawWritingMode(enode, drawbuf));
         int target_width = draw_vertical ? height : width;
         int target_height = draw_vertical ? width : height;
+        if ( draw_vertical ) {
+            RenderRectAccessor fmt(enode);
+            target_height = getVerticalPaintedInlineSize(enode, fmt, doc_x);
+        }
         lString32 filepath = lString32(style->background_image.c_str());
         LVImageSourceRef img = enode->getParentNode()->getDocument()->getObjectImageSource(filepath);
         if (img.isNull()) { // filepath may be url-encoded
@@ -10759,7 +10920,7 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                 draw_extra_info_t * dei = (draw_extra_info_t*)drawbuf.GetDrawExtraInfo();
                 int anchor = (dei && dei->vert_column_clip_right) ? dei->vert_column_clip_right : clip.right;
                 vertical_screen_top = x0 + doc_x;
-                vertical_screen_bottom = vertical_screen_top + width;
+                vertical_screen_bottom = vertical_screen_top + target_height;
                 vertical_screen_right = anchor - (y0 + doc_y);
                 vertical_screen_left = vertical_screen_right - height;
             }
@@ -11103,7 +11264,7 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
                 else {
                     // Regular element: draw bgcolor or image inside its border box
                     if ( draw_bg_color ) {
-                        if ( css_wm_is_vertical(resolveEffectiveWritingMode(enode)) )
+                        if ( css_wm_is_vertical(resolveEffectiveDrawWritingMode(enode, drawbuf)) )
                             DrawBackgroundColorVertical(drawbuf, enode, x0, y0, doc_x, doc_y, fmt, bg_color);
                         else
                             drawbuf.FillRect( x0 + doc_x, y0 + doc_y, x0 + doc_x+fmt.getWidth(), y0+doc_y+fmt.getHeight(), bg_color );
@@ -11394,7 +11555,7 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
                     // Note: this computation is wrong for paddings in %, as they should
                     // apply against the parent container width, not this block width.
                     bool draw_padding_bg = true; //( enode->getRendMethod()==erm_final );
-                    CSSLogical DL(style->writing_mode);
+                    CSSLogical DL((css_writing_mode_t)resolveEffectiveWritingMode(enode));
                     padding_left = !draw_padding_bg ? 0 : lengthToPx( enode, style->padding[DL.padIS()], width ) + DEBUG_TREE_DRAW+measureBorder(enode,DL.brdIS());
                     int padding_right = !draw_padding_bg ? 0 : lengthToPx( enode, style->padding[DL.padIE()], width ) + DEBUG_TREE_DRAW+measureBorder(enode,DL.brdIE());
                     padding_top = !draw_padding_bg ? 0 : lengthToPx( enode, style->padding[DL.padBS()], width ) + DEBUG_TREE_DRAW+measureBorder(enode,DL.brdBS());
@@ -11465,10 +11626,15 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
                         // In legacy mode, getAbsRect( ..., inner=true) did not have
                         // the inner geometry stored in fmt and computed. We need
                         // to correct it with paddings:
-                        int padding_left = measureBorder(enode,3)+lengthToPx(enode, enode->getStyle()->padding[0],rc.width());
-                        int padding_right = measureBorder(enode,1)+lengthToPx(enode, enode->getStyle()->padding[1],rc.width());
-                        int padding_top = measureBorder(enode,0)+lengthToPx(enode, enode->getStyle()->padding[2],rc.height());
-                        int padding_bottom = measureBorder(enode,2)+lengthToPx(enode, enode->getStyle()->padding[3],rc.height());
+                        CSSLogical DL((css_writing_mode_t)resolveEffectiveWritingMode(enode));
+                        int padding_left = measureBorder(enode, DL.brdIS())
+                            + lengthToPx(enode, enode->getStyle()->padding[DL.padIS()], rc.width());
+                        int padding_right = measureBorder(enode, DL.brdIE())
+                            + lengthToPx(enode, enode->getStyle()->padding[DL.padIE()], rc.width());
+                        int padding_top = measureBorder(enode, DL.brdBS())
+                            + lengthToPx(enode, enode->getStyle()->padding[DL.padBS()], rc.height());
+                        int padding_bottom = measureBorder(enode, DL.brdBE())
+                            + lengthToPx(enode, enode->getStyle()->padding[DL.padBE()], rc.height());
                         rc.top += padding_top;
                         rc.left += padding_left;
                         rc.right -= padding_right;
@@ -12789,8 +12955,11 @@ void getRenderedWidths(ldomNode * node, int &maxWidth, int &minWidth, int direct
             }
             // Account for any margin/border/padding around this inline node (no break
             // allowed between left/right pads and their followup/preceeding content)
-            int pad_left  = lengthToPx( node, style->margin[0], 0 ) + measureBorder(node, 3) + lengthToPx( node, style->padding[0], 0 );
-            int pad_right = lengthToPx( node, style->margin[1], 0 ) + measureBorder(node, 1) + lengthToPx( node, style->padding[1], 0 );
+            CSSLogical L((css_writing_mode_t)resolveEffectiveWritingMode(node));
+            int pad_left  = lengthToPx( node, style->margin[L.marIS()], 0 )
+                + measureBorder(node, L.brdIS()) + lengthToPx( node, style->padding[L.padIS()], 0 );
+            int pad_right = lengthToPx( node, style->margin[L.marIE()], 0 )
+                + measureBorder(node, L.brdIE()) + lengthToPx( node, style->padding[L.padIE()], 0 );
             if ( is_img || node->isEffectiveBoxingInlineBox() ) {
                 if (!nowrap) {
                     // Get done with previous word
@@ -13314,6 +13483,9 @@ void getRenderedWidths(ldomNode * node, int &maxWidth, int &minWidth, int direct
         // but not in the W3C box model (content-box)
         bool ignorePadding = use_style_width && style->box_sizing != css_bs_content_box;
 
+        // These are logical inline-start/end insets.  Their historical names
+        // are kept because this function returns the layout inline size.
+        CSSLogical L((css_writing_mode_t)resolveEffectiveWritingMode(node));
         int padLeft = 0; // these will include padding, border and margin
         int padRight = 0;
         // For % values, we need to reverse-apply them as a whole.
@@ -13325,22 +13497,22 @@ void getRenderedWidths(ldomNode * node, int &maxWidth, int &minWidth, int direct
         int padPctNb = 0; // nb of styles in % (to add 1px)
         // margin
         if (!ignoreMargin) {
-            if (style->margin[0].type == css_val_percent) {
-                padPct += style->margin[0].value;
+            if (style->margin[L.marIS()].type == css_val_percent) {
+                padPct += style->margin[L.marIS()].value;
                 padPctNb += 1;
             }
             else {
-                int margin = lengthToPx( node, style->margin[0], 0 );
+                int margin = lengthToPx( node, style->margin[L.marIS()], 0 );
                 if ( margin > 0 || BLOCK_RENDERING(rendFlags, ALLOW_HORIZONTAL_NEGATIVE_MARGINS) ) {
                     padLeft += margin;
                 }
             }
-            if (style->margin[1].type == css_val_percent) {
-                padPct += style->margin[1].value;
+            if (style->margin[L.marIE()].type == css_val_percent) {
+                padPct += style->margin[L.marIE()].value;
                 padPctNb += 1;
             }
             else {
-                int margin = lengthToPx( node, style->margin[1], 0 );
+                int margin = lengthToPx( node, style->margin[L.marIE()], 0 );
                 if ( margin > 0 || BLOCK_RENDERING(rendFlags, ALLOW_HORIZONTAL_NEGATIVE_MARGINS) ) {
                     padRight += margin;
                 }
@@ -13350,21 +13522,21 @@ void getRenderedWidths(ldomNode * node, int &maxWidth, int &minWidth, int direct
             bool is_rtl = direction == REND_DIRECTION_RTL;
             // padding
             int padding_left = 0;
-            if (style->padding[0].type == css_val_percent) {
-                padPct += style->padding[0].value;
+            if (style->padding[L.padIS()].type == css_val_percent) {
+                padPct += style->padding[L.padIS()].value;
                 padPctNb += 1;
             }
             else {
-                padding_left = lengthToPx( node, style->padding[0], 0 );
+                padding_left = lengthToPx( node, style->padding[L.padIS()], 0 );
                 padLeft += padding_left;
             }
             int padding_right = 0;
-            if (style->padding[1].type == css_val_percent) {
-                padPct += style->padding[1].value;
+            if (style->padding[L.padIE()].type == css_val_percent) {
+                padPct += style->padding[L.padIE()].value;
                 padPctNb += 1;
             }
             else {
-                padding_right = lengthToPx( node, style->padding[1], 0 );
+                padding_right = lengthToPx( node, style->padding[L.padIE()], 0 );
                 padRight += padding_right;
             }
             // negative text-indent (as handled in renderBlockElementEnhanced when erm_final
@@ -13385,13 +13557,13 @@ void getRenderedWidths(ldomNode * node, int &maxWidth, int &minWidth, int direct
                 }
             }
             // border (which does not accept units in %)
-            padLeft += measureBorder(node,3);
-            padRight += measureBorder(node,1);
+            padLeft += measureBorder(node, L.brdIS());
+            padRight += measureBorder(node, L.brdIE());
             // Handle our "padding-left:-cr-special" case, possibly still set on OL/UL if it has not
             // be overridden, used to dynamically size a list item container padding according to the
             // widest marker width (the above padding would have computed to 0 with "-cr-special").
-            if ( (!is_rtl && style->padding[0].type == css_val_unspecified && style->padding[0].value == css_generic_cr_special) ||
-                  (is_rtl && style->padding[1].type == css_val_unspecified && style->padding[1].value == css_generic_cr_special) ) {
+            if ( (!is_rtl && style->padding[L.padIS()].type == css_val_unspecified && style->padding[L.padIS()].value == css_generic_cr_special) ||
+                  (is_rtl && style->padding[L.padIE()].type == css_val_unspecified && style->padding[L.padIE()].value == css_generic_cr_special) ) {
                 // This node is expected to have children with "display:list-item". Look for any, considering
                 // only those with "list-style-position:outside" (inside/outside are allowed to be mixed).
                 int cnt = node->getChildCount();
