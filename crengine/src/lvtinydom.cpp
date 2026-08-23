@@ -22458,7 +22458,21 @@ int ldomNode::renderFinalBlock(  LFormattedTextRef & frmtext, RenderRectAccessor
                 }
                 RenderRectAccessor cur_fmt(cur);
                 css_style_ref_t cur_style = cur->getStyle();
-                CSSLogical curL(cur_style->writing_mode);
+                css_writing_mode_t cur_writing_mode = cur_style->writing_mode;
+                if (cur_writing_mode == css_wm_inherit) {
+                    for (ldomNode *p = cur->getParentNode(); p && p->isElement(); p = p->getParentNode()) {
+                        css_style_ref_t parent_style = p->getStyle();
+                        if (!parent_style.isNull() && parent_style->writing_mode != css_wm_inherit) {
+                            cur_writing_mode = parent_style->writing_mode;
+                            break;
+                        }
+                    }
+                }
+                // Synthetic nodes may not have an explicitly styled ancestor;
+                // in that case they share the final block's resolved mode.
+                if (cur_writing_mode == css_wm_inherit)
+                    cur_writing_mode = (css_writing_mode_t)effective_writing_mode;
+                CSSLogical curL(cur_writing_mode);
                 bvo += cur_fmt.getX();
                 bie += measureBorder(cur, curL.brdIE());
                 bie += lengthToPx(cur, cur_style->padding[curL.padIE()], cur_fmt.getWidth());

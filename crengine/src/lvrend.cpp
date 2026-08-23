@@ -73,6 +73,22 @@ static int resolveEffectiveWritingMode(ldomNode *enode)
     return writing_mode;
 }
 
+// A document-wide vertical flow can be selected from another spine item's
+// writing-mode declaration. In that case a later XHTML body may legitimately
+// keep `writing-mode: inherit` on every DOM node, even though the current page
+// is laid out and painted vertically. DrawDocument receives that resolved page
+// mode through draw_extra_info; use it only when the DOM has no local answer.
+static int resolveEffectiveDrawWritingMode(ldomNode *enode, LVDrawBuf &drawbuf)
+{
+    int writing_mode = resolveEffectiveWritingMode(enode);
+    if (writing_mode != css_wm_inherit)
+        return writing_mode;
+    draw_extra_info_t *extra = (draw_extra_info_t *)drawbuf.GetDrawExtraInfo();
+    if (extra && extra->writing_mode != css_wm_inherit)
+        return extra->writing_mode;
+    return writing_mode;
+}
+
 // FORK (vertical-rl): vertical box sizing diagnostics and image page-split
 // helpers. Keep these helpers local and fork-prefixed so upstream merges see
 // small call-site changes instead of scattered condition details.
@@ -3636,9 +3652,10 @@ bool renderAsListStylePositionInside( const css_style_ref_t style, bool is_rtl=f
     return false;
 }
 
-static inline bool shouldApplyVerticalRlDefaultInterline( css_style_ref_t style )
+static inline bool shouldApplyVerticalRlDefaultInterline( ldomNode *enode,
+                                                           css_style_ref_t style )
 {
-    return style->writing_mode == css_wm_vertical_rl
+    return resolveEffectiveWritingMode(enode) == css_wm_vertical_rl
         && style->line_height.type == css_val_unspecified
         && style->line_height.value == css_generic_normal;
 }
@@ -3889,7 +3906,7 @@ void renderFinalBlock( ldomNode * enode, LFormattedText * txform, RenderRectAcce
         // not if it was already in screen_px, which means it has already
         // been scaled (in setNodeStyle() when inherited).
         int interline_scale_factor = enode->getDocument()->getInterlineScaleFactor();
-        if ( shouldApplyVerticalRlDefaultInterline(style) ) {
+        if ( shouldApplyVerticalRlDefaultInterline(enode, style) ) {
             // Vertical Japanese text normally needs a wider line pitch than
             // horizontal text.  Apply the fork's vertical default only when
             // the book did not author an explicit line-height.
@@ -8120,7 +8137,10 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
     // Option C: use CSS logical properties so that padding/margin/border map to
     // the correct inline/block directions in vertical-rl mode.  CSSLogical (lvlogical.h)
     // returns the correct physical array index for each logical role.
-    CSSLogical L(style->writing_mode);
+    // Most EPUB child blocks inherit writing-mode from <body>.  Use the
+    // cascaded mode so their physical box properties are mapped to the same
+    // logical axes as their text and decorations.
+    CSSLogical L((css_writing_mode_t)resolveEffectiveWritingMode(enode));
     int border_left = measureBorder(enode, L.brdIS());
     int border_right = measureBorder(enode, L.brdIE());
     int padding_left   = lengthToPx( enode, style->padding[L.padIS()], container_width ) + border_left + DEBUG_TREE_DRAW;
@@ -10042,17 +10062,27 @@ static int getVerticalInlineEndPadding(ldomNode *enode, RenderRectAccessor fmt)
     return padding_end > 0 ? padding_end : 0;
 }
 
-// A vertical block's layout width is its initially allocated inline size.  It
-// is not always the size of the box that gets painted: an auto-sized block may
-// extend it to contain descendants that use more inline space.  That used size
-// is kept separately so layout can retain the allocated width while all box
-// decorations (backgrounds and borders) share the same painted rectangle.
-static int getVerticalPaintedInlineSize(RenderRectAccessor fmt)
+// In vertical layout, RenderRectAccessor::width is the block-flow allocation
+// (screen width), while the inline extent is the page height used by the text
+// formatter.  For an auto-height block, CSS therefore makes its background
+// and borders span that inline extent.  Using fmt.width here made a centered
+// heading use the page height while its enclosing rectangle stopped at the
+// page width.
+static int getVerticalPaintedInlineSize(ldomNode *enode, RenderRectAccessor fmt,
+                                        int doc_x)
 {
     if ( RENDER_RECT_HAS_FLAG(fmt, VERTICAL_USED_INLINE_SIZE_SET) ) {
         int used_inline_size = fmt.getVerticalUsedInlineSize();
         if ( used_inline_size > 0 )
             return used_inline_size;
+    }
+    css_style_ref_t style = enode->getStyle();
+    if ( style->height.type == css_val_unspecified
+            && style->height.value == css_generic_auto ) {
+        int page_height = enode->getDocument()->getPageHeight();
+        int remaining_inline_size = page_height - doc_x;
+        if ( remaining_inline_size > 0 )
+            return remaining_inline_size;
     }
     return fmt.getWidth();
 }
@@ -10116,7 +10146,7 @@ static void DrawBorderVertical(ldomNode *enode, LVDrawBuf & drawbuf,
     // The layout box supplies the block-direction extent.  Its separately
     // tracked used inline extent supplies the screen height, so the border
     // encloses the same rectangle as the background.
-    int screen_height = getVerticalPaintedInlineSize(fmt); // doc-X extent -> screen height
+    int screen_height = getVerticalPaintedInlineSize(enode, fmt, doc_x); // doc-X extent -> screen height
     int screen_width = fmt.getHeight();  // doc-Y extent -> screen width
     int screen_top    = x0 + doc_x;
     int screen_bottom = screen_top + screen_height;
@@ -10148,7 +10178,7 @@ static void DrawBackgroundColorVertical(LVDrawBuf & drawbuf, ldomNode *enode,
     draw_extra_info_t * dei = (draw_extra_info_t*)drawbuf.GetDrawExtraInfo();
     int anchor = (dei && dei->vert_column_clip_right) ? dei->vert_column_clip_right : clip.right;
 
-    int screen_height = getVerticalPaintedInlineSize(fmt); // doc-X extent -> screen height
+    int screen_height = getVerticalPaintedInlineSize(enode, fmt, doc_x); // doc-X extent -> screen height
     if ( shouldDebugForkVerticalBoxNode(enode) ) {
         fprintf(stderr,
             "KO_DEBUG_VERT_BG draw path=%s class=%s fmt_width=%d draw_width=%d fmt_height=%d "
@@ -10176,7 +10206,10 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
     css_style_ref_t style = enode->getStyle();
     // FORK (vertical-rl): borders need the Y=X swap+mirror; handle separately
     // so the upstream physical-edge drawing below stays untouched.
-    if ( css_wm_is_vertical(style->writing_mode) ) {
+    // Child elements normally inherit writing-mode from <body>, so their own
+    // style record keeps css_wm_inherit.  Dispatching on that record made
+    // borders in vertical EPUB sections take the horizontal paint path.
+    if ( css_wm_is_vertical(resolveEffectiveDrawWritingMode(enode, drawbuf)) ) {
         DrawBorderVertical(enode, drawbuf, x0, y0, doc_x, doc_y, fmt);
         return;
     }
@@ -10677,9 +10710,16 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
         // FORK (vertical-rl): regular element background images need the same
         // doc-X/doc-Y to screen-Y/screen-X mapping as borders and background
         // colors. Keep body/canvas background drawing on the legacy path.
-        bool draw_vertical = clip_to_target && css_wm_is_vertical(style->writing_mode);
+        // As with borders, background images on descendants must use their
+        // inherited writing mode, not just an explicitly declared value.
+        bool draw_vertical = clip_to_target
+            && css_wm_is_vertical(resolveEffectiveDrawWritingMode(enode, drawbuf));
         int target_width = draw_vertical ? height : width;
         int target_height = draw_vertical ? width : height;
+        if ( draw_vertical ) {
+            RenderRectAccessor fmt(enode);
+            target_height = getVerticalPaintedInlineSize(enode, fmt, doc_x);
+        }
         lString32 filepath = lString32(style->background_image.c_str());
         LVImageSourceRef img = enode->getParentNode()->getDocument()->getObjectImageSource(filepath);
         if (img.isNull()) { // filepath may be url-encoded
@@ -10880,7 +10920,7 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                 draw_extra_info_t * dei = (draw_extra_info_t*)drawbuf.GetDrawExtraInfo();
                 int anchor = (dei && dei->vert_column_clip_right) ? dei->vert_column_clip_right : clip.right;
                 vertical_screen_top = x0 + doc_x;
-                vertical_screen_bottom = vertical_screen_top + width;
+                vertical_screen_bottom = vertical_screen_top + target_height;
                 vertical_screen_right = anchor - (y0 + doc_y);
                 vertical_screen_left = vertical_screen_right - height;
             }
@@ -11224,7 +11264,7 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
                 else {
                     // Regular element: draw bgcolor or image inside its border box
                     if ( draw_bg_color ) {
-                        if ( css_wm_is_vertical(resolveEffectiveWritingMode(enode)) )
+                        if ( css_wm_is_vertical(resolveEffectiveDrawWritingMode(enode, drawbuf)) )
                             DrawBackgroundColorVertical(drawbuf, enode, x0, y0, doc_x, doc_y, fmt, bg_color);
                         else
                             drawbuf.FillRect( x0 + doc_x, y0 + doc_y, x0 + doc_x+fmt.getWidth(), y0+doc_y+fmt.getHeight(), bg_color );
