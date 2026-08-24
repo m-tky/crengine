@@ -1,14 +1,17 @@
 // =============================================================================
 // Fork-only LVDocView vertical-rl helpers.
 //
-// #included at the end of lvdocview.cpp so these methods belong to the
-// same translation unit as LVDocView's other definitions and can access
-// private members (m_doc, m_pages, m_dx, m_pageMargins).
+// This is a separate translation unit. Member definitions retain access to
+// LVDocView's private state while keeping the fork-only implementation out of
+// the upstream-owned lvdocview.cpp translation unit.
 //
 // Created during the upstream-merge-friendliness pass to keep lvdocview.cpp
 // closer to upstream.  Future upstream changes to LVDocView won't conflict
 // with these methods since they live in a separate fork-only file.
 // =============================================================================
+
+#include "../include/lvdocview.h"
+#include "../include/fb2def.h"
 
 /// Returns the screen-X anchor for the right edge of a vertical-rl page.
 /// In vertical-rl mode, columns are anchored at page_right: the first column

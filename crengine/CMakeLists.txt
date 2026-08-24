@@ -30,6 +30,7 @@ if ( NOT ${GUI} STREQUAL FB2PROPS )
     src/crskin.cpp    
     src/lvdrawbuf.cpp  
     src/lvdocview.cpp  
+    src/lvdocview_vert.cpp
     src/lvpagesplitter.cpp  
     src/lvtextfm.cpp
     src/lvrend.cpp
@@ -46,4 +47,3 @@ if ( NOT ${GUI} STREQUAL FB2PROPS )
 endif (NOT ${GUI} STREQUAL FB2PROPS)
 
 ADD_LIBRARY(crengine STATIC ${CRENGINE_SOURCES})
-

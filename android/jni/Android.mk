@@ -52,10 +52,12 @@ CRENGINE_SRC_FILES := \
     ../../crengine/src/lvfnt.cpp \
     ../../crengine/src/hyphman.cpp \
     ../../crengine/src/lvfntman.cpp \
+    ../../crengine/src/lvfntman_vert.cpp \
     ../../crengine/src/lvimg.cpp \
     ../../crengine/src/crskin.cpp \
     ../../crengine/src/lvdrawbuf.cpp \
     ../../crengine/src/lvdocview.cpp \
+    ../../crengine/src/lvdocview_vert.cpp \
     ../../crengine/src/lvpagesplitter.cpp \
     ../../crengine/src/lvtextfm.cpp \
     ../../crengine/src/lvrend.cpp \
@@ -237,4 +239,3 @@ LOCAL_LDLIBS    := -lm -llog -lz -ldl -Wl,-Map=cr3engine.map
 #-ljnigraphics
 
 include $(BUILD_SHARED_LIBRARY)
-
