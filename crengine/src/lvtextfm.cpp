@@ -6943,6 +6943,16 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         // needing a per-glyph offset lookup.
                         if (is_vertical) {
                             lvRect r = vertMarkRect(mark);
+                            if (getenv("CRE_LOG_VERT_MARKS")) {
+                                fprintf(stderr,
+                                    "VERT_MARK line=(x:%d y:%d w:%d h:%d) "
+                                    "mark=(%d,%d,%d,%d) screen=(%d,%d,%d,%d) "
+                                    "draw_origin=(%d,%d)\n",
+                                    (int)frmline->x, (int)frmline->y,
+                                    (int)frmline->width, (int)frmline->height,
+                                    mark.left, mark.top, mark.right, mark.bottom,
+                                    r.left, r.top, r.right, r.bottom, x, y);
+                            }
                             buf->FillRect(r.left, r.top, r.right, r.bottom, m_pbuffer->highlight_options.selectionColor);
                         } else {
                             buf->FillRect(mark.left + x, mark.top + y, mark.right + x, mark.bottom + y, m_pbuffer->highlight_options.selectionColor);
@@ -7016,8 +7026,54 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             int x0, y0;
                             int column_clip_right = draw_extra_info && draw_extra_info->vert_column_clip_right
                                     ? draw_extra_info->vert_column_clip_right : clip.right;
-                            applyVerticalImageDraw(frmline, word, y, line_x,
+                            // A replaced element that is the sole word in a ruby base
+                            // already receives its inline origin through `y` from
+                            // DrawDocument(). Its frmline->x still contains the
+                            // parent-line offset, so applying it again pushes gaiji
+                            // images one line fragment too far down.
+                            bool image_in_ruby_base = false;
+                            for ( ldomNode * ancestor = node->getParentNode(); ancestor;
+                                  ancestor = ancestor->getParentNode() ) {
+                                if ( ancestor->isElement() && ancestor->getNodeId() == el_rb ) {
+                                    image_in_ruby_base = true;
+                                    break;
+                                }
+                            }
+                            int image_y = y;
+                            int ruby_base_offset_removed = 0;
+                            if ( image_in_ruby_base && frmline->word_count == 1
+                                    && word->x == 0 && frmline->x != 0 ) {
+                                ruby_base_offset_removed = frmline->x;
+                                image_y -= frmline->x;
+                            }
+                            // A ruby cell may grow to fit a longer annotation. Do not
+                            // stretch an explicitly 1em square gaiji to that cell: CSS
+                            // sizes it from the image's own inherited font size. Keep
+                            // the logical cell advance, but centre the smaller image in
+                            // the inline axis, as a normal one-character ruby base is.
+                            formatted_word_t image_word = *word;
+                            int ruby_base_em_center_shift = 0;
+                            css_style_ref_t image_style = node->getStyle();
+                            int image_font_size = node->getFont().isNull()
+                                    ? 0 : node->getFont()->getSize();
+                            bool is_one_em_square = image_style->width.type == css_val_em
+                                    && image_style->width.value == 256
+                                    && image_style->height.type == css_val_em
+                                    && image_style->height.value == 256;
+                            if ( image_in_ruby_base && is_one_em_square
+                                    && image_font_size > 0
+                                    && image_word.width > image_font_size
+                                    && image_word.o.height > image_font_size ) {
+                                ruby_base_em_center_shift =
+                                        (image_word.o.height - image_font_size) / 2;
+                                image_y += ruby_base_em_center_shift;
+                                image_word.width = image_font_size;
+                                image_word.o.height = image_font_size;
+                            }
+                            applyVerticalImageDraw(frmline, &image_word, image_y, line_x,
                                 column_clip_right, clip, vstate, x0, y0);
+                            if ( ruby_base_em_center_shift )
+                                x0 = line_x - (int)frmline->height;
                             if ( verticalTextDebugEnabled() ) {
                                 lString32 img_class = node->getAttributeValue(attr_class);
                                 lString32 parent_class;
@@ -7025,21 +7081,25 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                                 if ( parent && parent->isElement() )
                                     parent_class = parent->getAttributeValue(attr_class);
                                 fprintf(stderr,
-                                        "KO_DEBUG_VERT_BG image path=%s class=%s parent_class=%s "
+                                        "KO_DEBUG_VERT_BG image path=%s src=%s class=%s parent_class=%s "
                                         "line_x=%d line_y=%d frm_x=%d frm_y=%d frm_width=%d frm_height=%d "
-                                        "word_x=%d word_width=%d word_height=%d draw=(%d,%d,%d,%d) "
+                                        "word_x=%d word_y=%d word_width=%d word_height=%d image_font_size=%d ruby_base_offset_removed=%d ruby_base_em_center_shift=%d draw=(%d,%d,%d,%d) "
                                         "clip=(%d,%d,%d,%d) vstate_next=%d\n",
                                         LCSTR(ldomXPointer(node, 0).toString()),
+                                        LCSTR(node->getAttributeValue(attr_src)),
                                         LCSTR(img_class),
                                         LCSTR(parent_class),
                                         line_x, line_y, (int)frmline->x, (int)frmline->y,
                                         (int)frmline->width, (int)frmline->height,
-                                        (int)word->x, (int)word->width, (int)word->o.height,
-                                        x0, y0, x0 + (int)word->width, y0 + (int)word->o.height,
+                                        (int)image_word.x, (int)image_word.y, (int)image_word.width, (int)image_word.o.height,
+                                        image_font_size,
+                                        ruby_base_offset_removed,
+                                        ruby_base_em_center_shift,
+                                        x0, y0, x0 + (int)image_word.width, y0 + (int)image_word.o.height,
                                         clip.left, clip.top, clip.right, clip.bottom,
                                         vstate.vert_min_next_x);
                             }
-                            buf->Draw( img, x0, y0, word->width, word->o.height );
+                            buf->Draw( img, x0, y0, image_word.width, image_word.o.height );
                         } else {
                             int xx = x + frmline->x + word->x;
                             int yy = line_y + frmline->baseline - word->o.height + word->y;
@@ -7075,6 +7135,16 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         // Fork: extracted to lvtextfm_vert.cpp.
                         applyVerticalInlineBoxDraw(frmline, srcline, word, node_x, node_y,
                             x, y, vstate, x0, y0, doc_x_ib, doc_y_ib);
+                        if ( verticalTextDebugEnabled() ) {
+                            fprintf(stderr,
+                                    "KO_DEBUG_VERT_BG inline_box path=%s line_x=%d frm_x=%d frm_y=%d "
+                                    "word_x=%d word_width=%d node=(%d,%d) input=(%d,%d) "
+                                    "draw=(%d,%d) doc=(%d,%d) vstate_next=%d\n",
+                                    LCSTR(ldomXPointer(node, 0).toString()),
+                                    line_x, (int)frmline->x, (int)frmline->y,
+                                    (int)word->x, (int)word->width, node_x, node_y, x, y,
+                                    x0, y0, doc_x_ib, doc_y_ib, vstate.vert_min_next_x);
+                        }
                     } else {
                         x0 = x + node_x;
                         y0 = y + node_y;
@@ -7203,6 +7273,15 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                                 x0, y0, vert_skip_draw,
                                 word_is_latin_in_vertical, word_is_vert_mark,
                                 word_is_exact_hanging);
+                            if (getenv("CRE_LOG_VERT_MARKS") && !vert_skip_draw) {
+                                fprintf(stderr,
+                                    "VERT_GLYPH text=U+%04X line=(x:%d y:%d w:%d h:%d) "
+                                    "word=(x:%d w:%d) screen=(%d,%d) draw_origin=(%d,%d)\n",
+                                    (unsigned int)str[0], (int)frmline->x, (int)frmline->y,
+                                    (int)frmline->width, (int)frmline->height,
+                                    (int)word->x, (int)word->width,
+                                    x0, y0, x, y);
+                            }
                         } else {
                             x0 = x + frmline->x + word->x;
                             y0 = line_y + (frmline->baseline - font->getBaseline()) + word->y;
