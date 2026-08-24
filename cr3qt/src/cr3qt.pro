@@ -37,9 +37,11 @@ SOURCES += main.cpp \
     ../crengine/src/lvmemman.cpp \
     ../crengine/src/lvimg.cpp \
     ../crengine/src/lvfntman.cpp \
+    ../crengine/src/lvfntman_vert.cpp \
     ../crengine/src/lvfnt.cpp \
     ../crengine/src/lvdrawbuf.cpp \
     ../crengine/src/lvdocview.cpp \
+    ../crengine/src/lvdocview_vert.cpp \
     ../crengine/src/lvbmpbuf.cpp \
     ../crengine/src/lstridmap.cpp \
     ../crengine/src/hyphman.cpp \

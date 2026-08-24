@@ -7749,9 +7749,3 @@ bool getBalancedHTML(LVStreamRef stream, lString8 & output, int wflags) {
     delete doc;
     return true;
 }
-
-// Fork-only: LVDocView vertical-rl method definitions live in a separate file
-// so this file stays close to upstream.  Methods (vertPageRight, isVerticalText)
-// are part of LVDocView and access private members; the #include must come
-// after the class definition is visible (i.e. at the end of this TU).
-#include "lvdocview_vert.cpp"
