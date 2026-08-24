@@ -19,7 +19,7 @@
 // Users of this library can request the old behaviour by setting
 // gDOMVersionRequested to an older version to request the old (possibly
 // buggy) behaviour.
-#define DOM_VERSION_CURRENT 20240114
+#define DOM_VERSION_CURRENT 20260812
 
 // Also defined in include/lvtinydom.h
 #define DOM_VERSION_WITH_NORMALIZED_XPOINTERS 20200223
@@ -88,6 +88,12 @@
 // EPUB <spine>, and not only those with media-type="application/xhtml+xml".
 // This means we can insert <DocFragment> in the DOM that wouldn't be here
 // before, and risk DocFragment[index] in xpointers to get the index shifted.
+//
+// 20260812: XPointers serialized by toStringV2() now always emit an
+// explicit [1] for the first sibling element of its kind. This avoids
+// costly forward sibling scans.
+// Also allows MOBI documents to inject a standalone <a> marker inside text
+// for resolving 'filepos' links (which may split a text node).
 
 #include "crsetup.h"
 
@@ -95,7 +101,7 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 
 /// change in case of incompatible changes in swap/cache file format to avoid using incompatible swap file
 // increment to force complete reload/reparsing of old file
-#define CACHE_FILE_FORMAT_VERSION "3.05.81k-vwm2"
+#define CACHE_FILE_FORMAT_VERSION "3.05.82k-vwm3"
 /// increment following value to force re-formatting of old book after load
 // 0x0036: vertical-rl page splitter uses a separate vert_split_page_h field
 //         (= page_width) for page-split boundaries while keeping page_h at
@@ -1811,7 +1817,6 @@ LVStreamRef ldomBlobCache::getBlob( lString32 name )
     return LVStreamRef();
 }
 
-#if BUILD_LITE!=1
 //#define DEBUG_RENDER_RECT_ACCESS
 #ifdef DEBUG_RENDER_RECT_ACCESS
   static signed char render_rect_flags[200000]={0};
@@ -2339,7 +2344,7 @@ void RenderRectAccessor::getInvolvedFloatIds( int & float_count, lUInt32 * float
     if (float_count > 3) float_ids[3] = _extra4;
     if (float_count > 4) float_ids[4] = _extra5;
 }
-void RenderRectAccessor::setInvolvedFloatIds( int float_count, lUInt32 * float_ids )
+void RenderRectAccessor::setInvolvedFloatIds( int float_count, const lUInt32 * float_ids )
 {
     if ( _dirty ) {
         _dirty = false;
@@ -2387,9 +2392,6 @@ void RenderRectAccessor::setVerticalUsedInlineSize( int size )
         _modified = true;
     }
 }
-
-#endif
-
 
 class ldomPersistentText;
 class ldomPersistentElement;
@@ -3892,6 +3894,8 @@ lxmlDocBase::lxmlDocBase( int /*dataBufSize*/ )
 {
     // create and add one data buffer
     _ua_stylesheet.setDocument( this );
+    // Style tweaks may contain @font-face rule, be sure we notice any change
+    _ua_stylesheet.enableFontFaceDeclTracking();
     _stylesheet.setDocument( this );
 }
 
@@ -4434,7 +4438,8 @@ static void writeSVGNode( LVStream * stream, ldomNode * node, bool forward_node_
 static void addAtImportCssFiles(ldomDocument * document, lString32 cssFile, lString32Collection & cssFiles); // defined just below writeNodeEx()
 
 static void writeNodeEx( LVStream * stream, ldomNode * node, lString32Collection & cssFiles, LVStream * extra_stream, int wflags=0,
-    ldomXPointerEx startXP=ldomXPointerEx(), ldomXPointerEx endXP=ldomXPointerEx(), int indentBaseLevel=-1)
+    ldomXPointerEx startXP=ldomXPointerEx(), ldomXPointerEx endXP=ldomXPointerEx(), int indentBaseLevel=-1,
+    ldomXPointerEx * currentXP=NULL, const ldomXPointerEx * startNodeXP=NULL, const ldomXPointerEx * endNodeXP=NULL)
 {
     bool isStartNode = false;
     bool isEndNode = false;
@@ -4442,48 +4447,46 @@ static void writeNodeEx( LVStream * stream, ldomNode * node, lString32Collection
     bool isBeforeEnd = false;
     bool containsStart = false;
     bool containsEnd = false;
+    // We used to recompute ldomXPointerEx(node, 0) at each recursive
+    // step, but that can be expensive on huge flat DOMs because it has
+    // to rebuild the node path from parent/sibling indexes. It is
+    // cheaper to compute the initial xpointer once, then update it
+    // while descending/ascending recursion. These locals back the
+    // optional XPointer parameters during that recursion.
+    ldomXPointerEx currentXPBacking;
+    ldomXPointerEx startNodeXPBacking;
+    ldomXPointerEx endNodeXPBacking;
 
     if ( !startXP.isNull() && !endXP.isNull() ) {
-        ldomXPointerEx currentEXP = ldomXPointerEx(node, 0);
-        // Use start (offset=0) of text node for comparisons, but keep original XPointers
-        ldomXPointerEx startEXP = ldomXPointerEx( startXP );
-        startEXP.setOffset(0);
-        ldomXPointerEx endEXP = ldomXPointerEx( endXP );
-        endEXP.setOffset(0);
-        if (currentEXP == startEXP)
-            isStartNode = true;
-        if (currentEXP == endEXP)
-            isEndNode = true;
-        if ( currentEXP.compare( startEXP ) >= 0 ) {
-            isAfterStart = true;
+        if ( !currentXP ) {
+            // Initial call: compute these once
+            currentXPBacking = ldomXPointerEx(node, 0);
+            currentXP = &currentXPBacking;
+            // Use start/end with offset=0 for node comparisons, but keep the
+            // original XPointers for text slicing below.
+            startNodeXPBacking = ldomXPointerEx( startXP );
+            startNodeXPBacking.setOffset(0);
+            startNodeXP = &startNodeXPBacking;
+            endNodeXPBacking = ldomXPointerEx( endXP );
+            endNodeXPBacking.setOffset(0);
+            endNodeXP = &endNodeXPBacking;
         }
-        if ( currentEXP.compare( endEXP ) <= 0 ) {
-            isBeforeEnd = true;
-        }
-        ldomNode *tmp;
-        tmp = startXP.getNode();
-        while (tmp) {
-            if (tmp == node) {
-                containsStart = true;
-                break;
-            }
-            tmp = tmp->getParentNode();
-        }
-        tmp = endXP.getNode();
-        while (tmp) {
-            if (tmp == node) {
-                containsEnd = true;
-                break;
-            }
-            tmp = tmp->getParentNode();
-        }
+        int cmpStart = currentXP->compare( *startNodeXP );
+        int cmpEnd = currentXP->compare( *endNodeXP );
+        isStartNode = cmpStart == 0;
+        isEndNode = cmpEnd == 0;
+        isAfterStart = cmpStart >= 0;
+        isBeforeEnd = cmpEnd <= 0;
+        containsStart = currentXP->isPathPrefixOf( *startNodeXP );
+        containsEnd = currentXP->isPathPrefixOf( *endNodeXP );
     }
     else {
+        // Whole subtree: no comparison and no XPointer maintenance needed
         containsStart = true;
         containsEnd = true;
         isAfterStart = true;
         isBeforeEnd = true;
-        // but not isStartNode nor isEndNode, as these use startXP and endXP
+        // but not isStartNode nor isEndNode: no actual start/end boundary node
     }
 
     bool isInitialNode = false;
@@ -4881,7 +4884,11 @@ static void writeNodeEx( LVStream * stream, ldomNode * node, lString32Collection
                 *stream << "\n";
             if ( ! isStylesheetTag ) {
                 for ( int i=0; i<(int)node->getChildCount(); i++ ) {
-                    writeNodeEx( stream, node->getChildNode(i), cssFiles, extra_stream, wflags, startXP, endXP, indentBaseLevel );
+                    bool moved = currentXP ? currentXP->child(i) : false;
+                    writeNodeEx( stream, node->getChildNode(i), cssFiles, extra_stream, wflags, startXP, endXP, indentBaseLevel,
+                        currentXP, startNodeXP, endNodeXP );
+                    if ( moved )
+                        currentXP->parent();
                 }
             }
             else {
@@ -6059,12 +6066,25 @@ bool lxmlDocBase::deserializeMaps( SerialBuf & buf )
 }
 #endif
 
-bool IsEmptySpace( const lChar32 * text, int len )
+static bool IsEmptySpace( const lChar32 * text, int len )
 {
    for (int i=0; i<len; i++)
       if ( text[i]!=' ' && text[i]!='\r' && text[i]!='\n' && text[i]!='\t')
          return false;
    return true;
+}
+
+bool ldomNode::isWhitespaceText() const
+{
+    if ( !isText() )
+        return false;
+    const lString8 s8(getText8());
+    const lChar8 * text = s8.c_str();
+    int len = s8.length();
+    for ( int i=0; i<len; i++ )
+        if ( text[i]!=' ' && text[i]!='\r' && text[i]!='\n' && text[i]!='\t' )
+            return false;
+    return true;
 }
 
 
@@ -6711,6 +6731,33 @@ static void copyRendMethodFromSources(ldomNode * node) {
         if ( source ) {
             if ( source->isElement() ) {
                 node->setRendMethod( source->getRendMethod() );
+                lUInt16 source_node_id = source->getNodeId();
+                if ( source_node_id == el_floatBox || source_node_id == el_inlineBox ) {
+                    // On these elements, initNodeRendMethod() has reported on them
+                    // a few specific styles from their child. But it skips cloneNodes,
+                    // and these styles are required for rendering floats and inlineboxes
+                    // part of the first line sequence. Let's do the same here.
+                    css_style_ref_t source_style = source->getStyle();
+                    css_style_ref_t node_style = node->getStyle();
+                    css_style_ref_t style( new css_style_rec_t );
+                    copystyle(node_style, style);
+                    bool style_changed = false;
+                    if ( node_style->display != source_style->display ) {
+                        style->display = source_style->display;
+                        style_changed = true;
+                    }
+                    if ( source_node_id == el_floatBox && node_style->float_ != source_style->float_ ) {
+                        style->float_ = source_style->float_;
+                        style_changed = true;
+                    }
+                    if ( source_node_id == el_inlineBox && !(node_style->vertical_align == source_style->vertical_align) ) {
+                        style->vertical_align = source_style->vertical_align;
+                        style_changed = true;
+                    }
+                    if ( style_changed ) {
+                        node->setStyle(style);
+                    }
+                }
             }
             else {
                 // Not really needed, but safer, and let's have ~i (inline)
@@ -6851,14 +6898,12 @@ void ldomNode::autoboxChildren( int startIndex, int endIndex, bool handleFloatin
     // (Note: did not check how floats inside <PRE> are supposed to work)
     if ( !pre ) {
         while ( firstNonEmpty<=endIndex && getChildNode(firstNonEmpty)->isText() ) {
-            lString32 s = getChildNode(firstNonEmpty)->getText();
-            if ( !IsEmptySpace(s.c_str(), s.length() ) )
+            if ( !getChildNode(firstNonEmpty)->isWhitespaceText() )
                 break;
             firstNonEmpty++;
         }
         while ( lastNonEmpty>=endIndex && getChildNode(lastNonEmpty)->isText() ) {
-            lString32 s = getChildNode(lastNonEmpty)->getText();
-            if ( !IsEmptySpace(s.c_str(), s.length() ) )
+            if ( !getChildNode(lastNonEmpty)->isWhitespaceText() )
                 break;
             lastNonEmpty--;
         }
@@ -6869,8 +6914,7 @@ void ldomNode::autoboxChildren( int startIndex, int endIndex, bool handleFloatin
                 hasInline = true;
                 if ( !hasNonEmptyInline ) {
                     if (node->isText()) {
-                        lString32 s = node->getText();
-                        if ( !IsEmptySpace(s.c_str(), s.length() ) ) {
+                        if ( !node->isWhitespaceText() ) {
                             hasNonEmptyInline = true;
                         }
                     }
@@ -7001,8 +7045,7 @@ bool ldomNode::cleanIfOnlyEmptyTextInline( bool handleFloating )
     for ( ; i>=0; i-- ) {
         ldomNode * node = getChildNode(i);
         if ( node->isText() ) {
-            lString32 s = node->getText();
-            if ( !IsEmptySpace(s.c_str(), s.length() ) ) {
+            if ( !node->isWhitespaceText() ) {
                 return false;
             }
         }
@@ -7040,8 +7083,7 @@ bool ldomNode::hasNonEmptyInlineContent( bool ignoreFloats )
     // padding top/bottom (and height if check ENSURE_STYLE_HEIGHT)
     // if these will introduce some content.
     if ( isText() ) {
-        lString32 s = getText();
-        return !IsEmptySpace(s.c_str(), s.length() );
+        return !isWhitespaceText();
     }
     if (getNodeId() == el_br) {
         return true;
@@ -7114,14 +7156,12 @@ ldomNode * ldomNode::boxWrapChildren( int startIndex, int endIndex, lUInt16 elem
     int lastNonEmpty = endIndex;
     if (!pre) {
         while ( firstNonEmpty<=endIndex && getChildNode(firstNonEmpty)->isText() ) {
-            lString32 s = getChildNode(firstNonEmpty)->getText();
-            if ( !IsEmptySpace(s.c_str(), s.length() ) )
+            if ( !getChildNode(firstNonEmpty)->isWhitespaceText() )
                 break;
             firstNonEmpty++;
         }
         while ( lastNonEmpty>=endIndex && getChildNode(lastNonEmpty)->isText() ) {
-            lString32 s = getChildNode(lastNonEmpty)->getText();
-            if ( !IsEmptySpace(s.c_str(), s.length() ) )
+            if ( !getChildNode(lastNonEmpty)->isWhitespaceText() )
                 break;
             lastNonEmpty--;
         }
@@ -7188,8 +7228,7 @@ int initTableRendMethods( ldomNode * enode, int state )
             if ( child->getNodeId() == el_autoBoxing && child->getChildCount() == 1 && child->getChildNode(0)->isText()) {
                 // A text node wrapped in an <autoBoxing> because it was surrounded
                 // by non-inline elements (the other table subelements)
-                lString32 s = child->getChildNode(0)->getText();
-                if ( IsEmptySpace(s.c_str(), s.length()) ) {
+                if ( child->getChildNode(0)->isWhitespaceText() ) {
                     is_whitespace = true;
                 }
             }
@@ -7200,8 +7239,7 @@ int initTableRendMethods( ldomNode * enode, int state )
             // by the XML parsers, but we may see some when completing
             // incomplete tables or when white-space:pre, or in case of
             // style changes (inline > table) after a book has been loaded.
-            lString32 s = child->getText();
-            if ( IsEmptySpace(s.c_str(), s.length()) ) {
+            if ( child->isWhitespaceText() ) {
                 is_whitespace = true;
             }
         }
@@ -7760,8 +7798,7 @@ void ldomNode::initNodeRendMethod()
                     // are all empty text.
                     for ( int i=0; i < getChildCount(); i++ ) {
                         if ( getChildNode(i)->isText() ) {
-                            lString32 s = getChildNode(i)->getText();
-                            if ( !IsEmptySpace(s.c_str(), s.length() ) ) {
+                            if ( !getChildNode(i)->isWhitespaceText() ) {
                                 has_non_empty_text_nodes = true;
                                 break;
                             }
@@ -7805,14 +7842,12 @@ void ldomNode::initNodeRendMethod()
                             // Remove any preceeding or following empty text nodes (there can't
                             // be consecutive text nodes) so we don't get spurious empty lines.
                             if ( i < getChildCount()-1 && getChildNode(i+1)->isText() ) {
-                                lString32 s = getChildNode(i+1)->getText();
-                                if ( IsEmptySpace(s.c_str(), s.length() ) ) {
+                                if ( getChildNode(i+1)->isWhitespaceText() ) {
                                     removeChildren(i+1, i+1);
                                 }
                             }
                             if ( i > 0 && getChildNode(i-1)->isText() ) {
-                                lString32 s = getChildNode(i-1)->getText();
-                                if ( IsEmptySpace(s.c_str(), s.length() ) ) {
+                                if ( getChildNode(i-1)->isWhitespaceText() ) {
                                     removeChildren(i-1, i-1);
                                     i--; // update our position
                                 }
@@ -7999,8 +8034,22 @@ void ldomNode::initNodeRendMethod()
                 // a cache file is used, and we'll end up being erm_final anyway).
                 // But let's keep it, in case it handles some edge cases.
             } else {
+                bool skipAutoboxLoop = false;
+                // Most mixed-content HTML nodes only have block children plus
+                // formatting whitespace text nodes. Drop these ignorable text
+                // runs in one compaction pass before the older autobox loop,
+                // so we don't pay for thousands of middle-of-array removals.
+                if ( removeStandaloneWhitespaceTextChildrenInMixedContent(handleFloating) ) {
+                    detectChildTypes( this, hasBlockItems, hasInline, hasInternalTableItems, hasFloating, handleFloating );
+                    if ( !hasInline ) {
+                        // If only block-ish children remain after that cleanup,
+                        // we can avoid the autobox pass entirely.
+                        setRendMethod( erm_block );
+                        skipAutoboxLoop = true;
+                    }
+                }
                 // cleanup or autobox
-                int i=getChildCount()-1;
+                int i = skipAutoboxLoop ? -1 : getChildCount()-1;
                 for ( ; i>=0; i-- ) {
                     ldomNode * node = getChildNode(i);
 
@@ -8065,8 +8114,7 @@ void ldomNode::initNodeRendMethod()
                             int run_in_idx = inBetweenTextNode ? i-2 : i-1;
                             int block_idx = i;
                             if ( inBetweenTextNode ) {
-                                lString32 text = inBetweenTextNode->getText();
-                                if ( IsEmptySpace(text.c_str(), text.length() ) ) {
+                                if ( inBetweenTextNode->isWhitespaceText() ) {
                                     removeChildren(i-1, i-1);
                                     block_idx = i-1;
                                 }
@@ -8155,8 +8203,7 @@ void ldomNode::initNodeRendMethod()
                 int cm = child->getRendMethod();
                 int is_whitespace = false;
                 if ( child->getNodeId() == el_autoBoxing && child->getChildCount() == 1 && child->getChildNode(0)->isText() ) {
-                    lString32 s = child->getChildNode(0)->getText();
-                    if ( IsEmptySpace(s.c_str(), s.length()) )
+                    if ( child->getChildNode(0)->isWhitespaceText() )
                         is_whitespace = true;
                 }
                 if ( cd == css_d_table_cell ) {
@@ -8247,8 +8294,7 @@ void ldomNode::initNodeRendMethod()
             int cm = child->getRendMethod();
             int is_whitespace = false;
             if ( child->getNodeId() == el_autoBoxing && child->getChildCount() == 1 && child->getChildNode(0)->isText() ) {
-                lString32 s = child->getChildNode(0)->getText();
-                if ( IsEmptySpace(s.c_str(), s.length()) )
+                if ( child->getChildNode(0)->isWhitespaceText() )
                     is_whitespace = true;
             }
             bool is_misparented = false;
@@ -8488,8 +8534,7 @@ void ldomNode::initNodeRendMethod()
                         elemId = child->getNodeId();
                     }
                     else {
-                        lString32 s = child->getText();
-                        elemId = IsEmptySpace(s.c_str(), s.length()) ? -2 : -1;
+                        elemId = child->isWhitespaceText() ? -2 : -1;
                         // When meeting an empty space (elemId==-2), we'll delay wrapping
                         // decision to when we process the next node.
                         // We'll also not start a wrap with it.
@@ -8577,8 +8622,7 @@ void ldomNode::initNodeRendMethod()
                             elemId = child->getNodeId();
                         }
                         else {
-                            lString32 s = child->getText();
-                            elemId = IsEmptySpace(s.c_str(), s.length()) ? -2 : -1;
+                            elemId = child->isWhitespaceText() ? -2 : -1;
                             // When meeting an empty space (elemId==-2), we'll delay wrapping
                             // decision to when we process the next node.
                             // We'll also not start a wrap with it.
@@ -9555,6 +9599,9 @@ void ldomDocumentWriter::OnTagClose( const lChar32 *, const lChar32 * tagname, b
     // handle. So, here below, we check that both id and curNodeId match the
     // element id we check for.
 
+    if ( id == el_style && curNodeId == el_style )
+        _inHeadStyle = false;
+
     // Parse <link rel="stylesheet">, put the css file link in _stylesheetLinks.
     // They will be added to <body><stylesheet> when we meet <BODY>
     // (duplicated in ldomDocumentWriterFilter::OnTagClose)
@@ -9666,7 +9713,6 @@ void ldomDocumentWriter::OnText( const lChar32 * text, int len, lUInt32 flags )
     // Accumulate <HEAD><STYLE> content
     if (_inHeadStyle) {
         _headStyleText << lString32(text, len);
-        _inHeadStyle = false;
         return;
     }
 
@@ -11753,10 +11799,15 @@ lString32 ldomXPointer::toStringV2()
             lString32 name = p->getNodeName();
             if ( !parent )
                 return "/" + name + path;
+            // The following "cosmetic" xpointer string tweak could be costly
+            // in some cases. Do it only when an older dom_version is requested
+            // (= previously opened books, as frontend may rely on raw string
+            // equality with saved annotations).
+            bool explicitFirstIndex = getDocument()->getDOMVersionRequested() >= 20260812;
             int count = 0;
             ldomNodeIdPredicate predicat(p->getNodeId());
             int index = getElementIndex(parent, p, predicat, count);
-            if ( count == 1 ) {
+            if ( !explicitFirstIndex && count == 1 ) {
                 // We're first, but see if we have following siblings with the
                 // same element name, so we can have "div[1]" instead of "div"
                 // when parent has more than one of it (as toStringV1 does).
@@ -11768,7 +11819,7 @@ lString32 ldomXPointer::toStringV2()
                     }
                 }
             }
-            if ( count>1 )
+            if ( explicitFirstIndex || count>1 )
                 path = cs32("/") + name + "[" + fmt::decimal(index) + "]" + path;
             else
                 path = cs32("/") + name + path;
@@ -11776,9 +11827,10 @@ lString32 ldomXPointer::toStringV2()
             // text
             if ( !parent )
                 return cs32("/text()") + path;
+            bool explicitFirstIndex = getDocument()->getDOMVersionRequested() >= 20260812;
             int count = 0;
             int index = getElementIndex(parent, p, isTextNode, count);
-            if ( count == 1 ) {
+            if ( !explicitFirstIndex && count == 1 ) {
                 // We're first, but see if we have following text siblings,
                 // so we can have "text()[1]" instead of "text()" when
                 // parent has more than one text node (as toStringV1 does).
@@ -11790,7 +11842,7 @@ lString32 ldomXPointer::toStringV2()
                     }
                 }
             }
-            if ( count>1 )
+            if ( explicitFirstIndex || count>1 )
                 path = cs32("/text()") + "[" + fmt::decimal(index) + "]" + path;
             else
                 path = "/text()" + path;
@@ -12140,6 +12192,17 @@ void ldomXPointerEx::initIndex()
     for ( int i=0; i<_level; i++ ) {
         _indexes[ i ] = m[ _level - i - 1 ];
     }
+}
+
+bool ldomXPointerEx::isPathPrefixOf( const ldomXPointerEx & v ) const
+{
+    if ( _level > v._level )
+        return false;
+    for ( int i=0; i<_level; i++ ) {
+        if ( _indexes[i] != v._indexes[i] )
+            return false;
+    }
+    return true;
 }
 
 /// move to sibling #
@@ -17608,6 +17671,9 @@ void ldomDocumentWriterFilter::OnTagClose( const lChar32 * /*nsname*/, const lCh
         }
     }
 
+    if ( id == el_style && curNodeId == el_style )
+        _inHeadStyle = false;
+
     // Parse <link rel="stylesheet">, put the css file link in _stylesheetLinks,
     // they will be added to <body><stylesheet> when we meet <BODY>
     // (duplicated in ldomDocumentWriter::OnTagClose)
@@ -17695,7 +17761,6 @@ void ldomDocumentWriterFilter::OnText( const lChar32 * text, int len, lUInt32 fl
     // Accumulate <HEAD><STYLE> content
     if (_inHeadStyle) {
         _headStyleText << lString32(text, len);
-        _inHeadStyle = false;
         return;
     }
 
@@ -20057,7 +20122,7 @@ const lString32 & ldomNode::getFirstInnerAttributeValue( lUInt16 nsid, lUInt16 i
 }
 
 /// returns all attribute values by attribute name id, looking at all children
-const void ldomNode::getAllInnerAttributeValues( lUInt16 nsid, lUInt16 id, lString32Collection & values ) const
+void ldomNode::getAllInnerAttributeValues( lUInt16 nsid, lUInt16 id, lString32Collection & values ) const
 {
     ASSERT_NODE_NOT_NULL;
     values.clear();
@@ -21608,6 +21673,81 @@ void ldomNode::addChild( lInt32 childNodeIndex )
     me->_children.add( childNodeIndex );
 }
 
+bool ldomNode::removeStandaloneWhitespaceTextChildrenInMixedContent( bool handleFloating )
+{
+#if BUILD_LITE!=1
+    ASSERT_NODE_NOT_NULL;
+    if ( !isElement() )
+        return false;
+    // In mixed block/inline content, most inline runs are often just whitespace
+    // separators between block siblings (typical HTML pretty-printing). The
+    // legacy autoboxChildren() path would later remove them one by one from the
+    // middle of a potentially huge _children array, which is quadratic. Compact
+    // them in one pass here, now that styles and rendMethods tell us whether
+    // such whitespace is really ignorable in this context.
+    tinyElement * me = isPersistent() ? NULL : NPELEM;
+    int childCount = getChildCount();
+    if ( childCount == 0 )
+        return false;
+    LVArray<lInt32> keptChildren;
+    bool compacting = false;
+    for ( int i=0; i<childCount; ) {
+        ldomNode * node = getChildNode(i);
+        if ( node->isWhitespaceText() ) {
+            int j = i;
+            while ( j+1 < childCount && getChildNode(j+1)->isWhitespaceText() )
+                j++;
+            ldomNode * prev = i > 0 ? getChildNode(i-1) : NULL;
+            ldomNode * next = j+1 < childCount ? getChildNode(j+1) : NULL;
+            bool prevInlineish = prev && ( isInlineNode(prev) || (handleFloating && isFloatingNode(prev)) );
+            bool nextInlineish = next && ( isInlineNode(next) || (handleFloating && isFloatingNode(next)) );
+            // Keep whitespace only when it sits between inline-ish siblings.
+            // Leading/trailing whitespace around such runs, and whitespace
+            // between block siblings, would be trimmed or removed later by
+            // autoboxChildren(); doing it in one pass avoids many costly
+            // middle-of-array removals on huge child collections.
+            bool keepRun = prevInlineish && nextInlineish && ( isInlineNode(prev) || isInlineNode(next) );
+            if ( keepRun ) {
+                if ( compacting ) {
+                    for ( int k=i; k<=j; k++ )
+                        keptChildren.add( me->_children[k] );
+                }
+            }
+            else {
+                if ( !compacting ) {
+                    // Keep the common no-removal path cheap: delay both modify()
+                    // and temporary array allocation until we have found the
+                    // first whitespace run that should really be dropped.
+                    if ( !me ) {
+                        modify();
+                        me = NPELEM;
+                    }
+                    compacting = true;
+                    keptChildren.reserve(childCount);
+                    for ( int k=0; k<i; k++ )
+                        keptChildren.add( me->_children[k] );
+                }
+                for ( int k=i; k<=j; k++ )
+                    getChildNode(k)->destroy();
+            }
+            i = j + 1;
+            continue;
+        }
+        if ( compacting )
+            keptChildren.add( me->_children[i] );
+        i++;
+    }
+    if ( compacting ) {
+        me->_children = keptChildren;
+        return true;
+    }
+    return false;
+#else
+    CR_UNUSED(handleFloating);
+    return false;
+#endif
+}
+
 /// move range of children startChildIndex to endChildIndex inclusively to specified element
 void ldomNode::moveItemsTo( ldomNode * destination, int startChildIndex, int endChildIndex )
 {
@@ -22193,8 +22333,10 @@ LVStreamRef ldomDocument::getObjectImageStream( lString32 refName )
         if ( data.startsWith(lString32("data:image/svg+xml")) ) {
             int pos = data.pos(U',');
             if ( pos > 0 ) {
-                // The attribute value has already been url-decoded at parsing time
-                lString8 plaindata = UnicodeToUtf8(refName.substr(pos+1));
+                // The payload may or may not be percent-encoded (eg. a CSS
+                // background-image - DecodeHTMLUrlString() is a no-op when
+                // there is nothing to decode.
+                lString8 plaindata = UnicodeToUtf8(DecodeHTMLUrlString(refName.substr(pos+1)));
                 ref = LVCreateStringStream(plaindata);
                 return ref;
             }
