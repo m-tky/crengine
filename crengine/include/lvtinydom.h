@@ -865,7 +865,7 @@ public:
     void getNextFloatMinYs( int & left, int & right );
     void setNextFloatMinYs( int left, int right );
     void getInvolvedFloatIds( int & float_count, lUInt32 * float_ids );
-    void setInvolvedFloatIds( int float_count, lUInt32 * float_ids );
+    void setInvolvedFloatIds( int float_count, const lUInt32 * float_ids );
     int  getVerticalUsedInlineSize();
     void setVerticalUsedInlineSize( int size );
 
@@ -970,6 +970,7 @@ private:
     void autoboxChildren( int startIndex, int endIndex, bool handleFloating=false );
     void removeChildren( int startIndex, int endIndex );
     bool cleanIfOnlyEmptyTextInline( bool handleFloating=false );
+    bool removeStandaloneWhitespaceTextChildrenInMixedContent( bool handleFloating=false );
     /// returns true if element has inline content (non empty text, images, <BR>)
     bool hasNonEmptyInlineContent( bool ignoreFloats=false );
 
@@ -1157,8 +1158,8 @@ public:
     const lString32 & getFirstInnerAttributeValue( lUInt16 nsid, lUInt16 id ) const;
     const lString32 & getFirstInnerAttributeValue( lUInt16 id ) const { return getFirstInnerAttributeValue( LXML_NS_ANY, id ); }
     /// returns all attribute values by attribute name id, looking at all children
-    const void getAllInnerAttributeValues( lUInt16 nsid, lUInt16 id, lString32Collection & values ) const;
-    const void getAllInnerAttributeValues( lUInt16 id, lString32Collection & values ) const {
+    void getAllInnerAttributeValues( lUInt16 nsid, lUInt16 id, lString32Collection & values ) const;
+    void getAllInnerAttributeValues( lUInt16 id, lString32Collection & values ) const {
         return getAllInnerAttributeValues( LXML_NS_ANY, id, values );
     }
 
@@ -1296,6 +1297,8 @@ public:
 
     /// for display:list-item node, get marker
     bool getNodeListMarker( int & counterValue, lString32 & marker, int & markerWidth );
+    /// returns true if text node contains only plain whitespace
+    bool isWhitespaceText() const;
     /// is node a floating floatBox
     bool isFloatingBox() const;
     /// is node an inlineBox that has not been re-inlined by having
@@ -1868,9 +1871,9 @@ protected:
     void initIndex();
 public:
     /// returns bottom level index
-    int getIndex() { return _indexes[_level-1]; }
+    int getIndex() const { return _indexes[_level-1]; }
     /// returns node level
-    int getLevel() { return _level; }
+    int getLevel() const { return _level; }
     /// default constructor
     ldomXPointerEx()
 	    : ldomXPointer()
@@ -1926,6 +1929,8 @@ public:
     {
         return _data->getDocument()==v._data->getDocument() && _data->getNode()==v._data->getNode() && _data->getOffset()==v._data->getOffset();
     }
+    /// returns true when this node path is a prefix of the provided xpointer path
+    bool isPathPrefixOf( const ldomXPointerEx & v ) const;
     /// searches path for element with specific id, returns level at which element is founs, 0 if not found
     int findElementInPath( lUInt16 id );
     /// compare two pointers, returns -1, 0, +1
@@ -3269,7 +3274,7 @@ lString32 extractDocSeriesAndNumber( ldomDocument * doc, lString32 & seriesNumbe
 lString32 extractDocKeywords( ldomDocument * doc );
 lString32 extractDocDescription( ldomDocument * doc );
 
-bool IsEmptySpace( const lChar32 * text, int len );
+
 
 /// parse XML document from stream, returns NULL if failed
 ldomDocument * LVParseXMLStream( LVStreamRef stream,

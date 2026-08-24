@@ -3215,9 +3215,10 @@ bool getStyledImageSize( ldomNode * enode, int & img_width, int & img_height, in
         //     https://wiki.mozilla.org/SVG:Sizing
         //     https://docs.google.com/presentation/d/1POUiroOBbLmXYlQKf0pIR8zVkHWH9jRVN-w8A4aNsIk/
         //     https://oreillymedia.github.io/Using_SVG/guide/units.html
-        //   ie. <svg width="100%" height="100%" viewBox="0 0 509 800" preserveAspectRatio="xMidYMid meet">
-        //   SVG wrappers for cover images use width="100%" and height="100%"
-        //   So, assume the % to be relative to the container width and the page height
+        //   We still resolve a % width against the known container width, as that gives
+        //   sensible results for the common wrappers like:
+        //     <svg width="100%" height="100%" viewBox="0 0 509 800" ...>
+        //   But for height we only resolve % when we have a definite container height.
         lString32 at_width = enode->getAttributeValue(attr_width);
         if ( !at_width.empty() ) {
             lString8 s8 = UnicodeToUtf8(at_width);
@@ -3236,8 +3237,20 @@ bool getStyledImageSize( ldomNode * enode, int & img_width, int & img_height, in
             css_length_t svg_h;
             if ( parse_number_value(s, svg_h) ) {
                 if ( svg_h.type == css_val_percent ) {
-                    int ref_height = enode->getDocument()->getPageHeight() - enode->getSurroundingAddedHeight(true);
-                    height = lengthToPx(enode, svg_h, ref_height);
+                    if ( container_height >= 0 ) {
+                        height = lengthToPx(enode, svg_h, container_height);
+                    }
+                    // We used to have:
+                    //  int ref_height = enode->getDocument()->getPageHeight() - enode->getSurroundingAddedHeight(true);
+                    //  height = lengthToPx(enode, svg_h, ref_height);
+                    // to treat height="100%" as "page height", but this makes
+                    // inline or inline-block SVG wrappers spuriously page-tall.
+                    // But it seems we can just leave it unset: the generic used-value
+                    // sizing code below will derive the missing height from the
+                    // resolved width and the SVG intrinsic aspect ratio.
+                    // Then, when formatted by lvtextfm.cpp, it may be scaled down
+                    // further so the final rendered height, plus surrounding
+                    // margins/borders/padding, does not overflow the page height.
                 }
                 else if ( is_length_relative_unit(svg_h) ) {
                     height = lengthToPx(enode, svg_h, 0);
@@ -5190,7 +5203,8 @@ void copystyle( css_style_ref_t source, css_style_ref_t dest )
     dest->border_color[3]=source->border_color[3];
     dest->background_image=source->background_image;
     dest->background_repeat=source->background_repeat;
-    dest->background_position=source->background_position;
+    dest->background_position[0]=source->background_position[0];
+    dest->background_position[1]=source->background_position[1];
     dest->background_size[0]=source->background_size[0];
     dest->background_size[1]=source->background_size[1];
     dest->border_collapse=source->border_collapse;
@@ -5788,8 +5802,7 @@ int renderBlockElementLegacy( LVRendPageContext & context, ldomNode * enode, int
                         if ( child->isText() ) {
                             // We may occasionally let empty text nodes among block elements,
                             // just skip them
-                            lString32 s = child->getText();
-                            if ( IsEmptySpace(s.c_str(), s.length() ) )
+                            if ( child->isWhitespaceText() )
                                 continue;
                             crFatalError(144, "Attempting to render non-empty Text node");
                         }
@@ -6214,6 +6227,9 @@ private:
     int  last_split_after_flag; // in case we need to adjust upcoming line's flag vs previous line's
     bool in_non_linear_sequence;
     bool in_combining_non_linear_sequence;
+    bool initial_letter_active;
+    lUInt32 initial_letter_id; // inlineBox id (x/width/side are rebuilt from it when needed)
+    int  initial_letter_end_y; // flow-relative end y, kept only for quick "already past current y?" checks
 
     // vm_* : state of our handling of collapsable vertical margins
     bool vm_has_some;              // true when some vertical margin added, reset to false when pushed
@@ -6257,6 +6273,9 @@ public:
         last_split_after_flag(RN_SPLIT_AUTO),
         in_non_linear_sequence(false),
         in_combining_non_linear_sequence(false),
+        initial_letter_active(false),
+        initial_letter_id(0),
+        initial_letter_end_y(0),
         vm_has_some(false),
         vm_disabled(false),
         vm_target_avoid_pb_inside(false),
@@ -6499,6 +6518,44 @@ public:
         return baseline_y;
     }
 
+    bool hasCarriedInitialLetter() {
+        return initial_letter_active;
+    }
+    bool hasCarriedInitialLetterAtY(int y) {
+        return initial_letter_active && initial_letter_end_y > y;
+    }
+    void resetCarriedInitialLetterExclusion() {
+        initial_letter_active = false;
+        initial_letter_id = 0;
+        initial_letter_end_y = 0;
+    }
+    void setCarriedInitialLetterExclusion( lUInt32 node_id, int end_y ) {
+        if ( node_id == 0 || end_y <= c_y ) {
+            resetCarriedInitialLetterExclusion();
+            return;
+        }
+        initial_letter_active = true;
+        initial_letter_id = node_id;
+        initial_letter_end_y = end_y;
+    }
+    bool advancePastCarriedInitialLetter() {
+        if ( !initial_letter_active ) {
+            return false;
+        }
+        int cleared_y = initial_letter_end_y;
+        int dy = cleared_y - c_y;
+        if ( dy > 0 ) {
+            addSpaceToContext(c_y, cleared_y, 1, false, false, false);
+            moveDown( dy );
+            seen_content_since_page_split = true;
+        }
+        resetCarriedInitialLetterExclusion();
+        return dy > 0;
+    }
+
+    bool hasActiveFloatFootprint() {
+        return _floats.length() > 0 || initial_letter_active;
+    }
     bool hasActiveFloats() {
         return _floats.length() > 0;
     }
@@ -6562,7 +6619,7 @@ public:
         // Ensure avoid_pb_inside
         if ( avoid_pb_inside_just_toggled_off ) {
             avoid_pb_inside_just_toggled_off = false;
-            if ( !split_avoid_before && (skip_float_checks || !hasFloatRunningAtY(starty)) ) {
+            if ( !split_avoid_before && (skip_float_checks || (!hasFloatRunningAtY(starty) && !hasCarriedInitialLetterAtY(starty))) ) {
                 // Previous added line may have RN_SPLIT_AFTER_AVOID, but
                 // we want to allow a split between it and this new line:
                 // just add an empty line to cancel the split avoid
@@ -6603,7 +6660,7 @@ public:
                 flags |= RN_SPLIT_AFTER_AVOID;
             if ( split_avoid_inside && !is_first & !is_last )
                 flags |= RN_SPLIT_BEFORE_AVOID | RN_SPLIT_AFTER_AVOID;
-            if ( !skip_float_checks && hasFloatRunningAtY(y0) )
+            if ( !skip_float_checks && (hasFloatRunningAtY(y0) || hasCarriedInitialLetterAtY(y0)) )
                 flags |= RN_SPLIT_BEFORE_AVOID;
             flags |= line_dir_flag;
             context.AddLine(y0, y1, flags);
@@ -6622,11 +6679,10 @@ public:
             // but we want to allow a split between it and this new
             // line or the coming pushed vertical margin:
             // just add an empty line to cancel the split avoid
-            if ( !(flags & RN_SPLIT_BEFORE_AVOID) ) {
-                if ( isVertical() || !hasFloatRunningAtY(c_y) ) {
-                    context.AddLine( flowPos(), flowPos(), RN_SPLIT_BOTH_AUTO|line_dir_flag );
-                    last_split_after_flag = RN_SPLIT_AUTO;
-                }
+            if ( !(flags & RN_SPLIT_BEFORE_AVOID) &&
+                    ( isVertical() || (!hasFloatRunningAtY(c_y) && !hasCarriedInitialLetterAtY(c_y)) ) ) {
+                context.AddLine( flowPos(), flowPos(), RN_SPLIT_BOTH_AUTO|line_dir_flag );
+                last_split_after_flag = RN_SPLIT_AUTO;
             }
         }
         if ( avoid_pb_inside ) {
@@ -6654,7 +6710,7 @@ public:
         // Most often for content lines, lvtextfm.cpp's LVFormatter will
         // have already checked for float (via BlockFloatFootprint), so
         // avoid calling hasFloatRunningAtY() when not needed
-        if ( !(flags & RN_SPLIT_BEFORE_AVOID) && hasFloatRunningAtY(c_y) )
+        if ( !(flags & RN_SPLIT_BEFORE_AVOID) && (hasFloatRunningAtY(c_y) || hasCarriedInitialLetterAtY(c_y)) )
             flags |= RN_SPLIT_BEFORE_AVOID;
         flags |= line_dir_flag;
         context.AddLine( flowPos(), flowPos() + height, flags );
@@ -6805,6 +6861,12 @@ public:
             // Avoid consecutive page split when no real content in between
             if ( BLOCK_RENDERING(rend_flags, ALLOW_PAGE_BREAK_WHEN_NO_CONTENT) || seen_content_since_page_split ) {
                 if ( vm_active_pb_flag != RN_SPLIT_ALWAYS ) {
+                    if ( hasCarriedInitialLetter() ) {
+                        // Don't break through a carried initial letter.
+                        // (For floats, break-before is handled earlier when preparing the child
+                        // in renderBlockElementEnhanced() where we also handle clear:)
+                        advancePastCarriedInitialLetter();
+                    }
                     // First break-before or break-after:always seen.
                     // Forget any previously seen margin, as it would
                     // collapse at end of previous page, but we won't
@@ -6918,6 +6980,12 @@ public:
         int margin = getCurrentVerticalMargin();
         vm_back_usable_as_margin = 0;
         // printf("pushing vertical margin %d (%x %d)\n", margin, vm_target_node, vm_target_level);
+
+        // A nested child may have produced a carried initial after an outer
+        // break-*:always was queued. Clear it at the last possible point.
+        if ( vm_active_pb_flag == RN_SPLIT_ALWAYS && hasCarriedInitialLetter() ) {
+            advancePastCarriedInitialLetter();
+        }
 
         // Note: below, we allow some margin (previous page margin) to be discarded
         // if it can not fit on the previous page and is pushed on next page. This is
@@ -7043,11 +7111,11 @@ public:
                     flags &= ~RN_SPLIT_AFTER_ALWAYS;
                     flags |= RN_SPLIT_AFTER_AVOID;
                 }
-                if ( !isVertical() && hasFloatRunningAtY(c_y, margin) ) {
+                if ( !isVertical() && (hasFloatRunningAtY(c_y, margin) || hasCarriedInitialLetterAtY(c_y)) ) {
                     // Don't discard margin, or we would discard some part of a float
                     flags &= ~RN_SPLIT_DISCARD_AT_START;
                 }
-                if ( !isVertical() && hasFloatRunningAtY(c_y) ) {
+                if ( !isVertical() && (hasFloatRunningAtY(c_y) || hasCarriedInitialLetterAtY(c_y)) ) {
                     // Avoid a split
                     flags &= ~RN_SPLIT_BEFORE_ALWAYS;
                     flags |= RN_SPLIT_BEFORE_AVOID;
@@ -7279,6 +7347,11 @@ public:
                     // no page split over them
                 }
             }
+            if ( initial_letter_active && initial_letter_end_y > new_c_y ) {
+                // A carried initial-letter tail cannot escape the block
+                // formatting context either.
+                new_c_y = initial_letter_end_y;
+            }
             // addSpaceToContext() will take care of avoiding page split
             // where some (non-cleared) floats are still running.
             addSpaceToContext(last_c_y, new_c_y, 1, false, false, false);
@@ -7358,6 +7431,9 @@ public:
                 _floats.remove(i);
                 delete flt;
             }
+        }
+        if ( initial_letter_active && initial_letter_end_y <= c_y ) {
+            resetCarriedInitialLetterExclusion();
         }
         return had_floats_running;
     }
@@ -7607,10 +7683,11 @@ public:
     BlockFloatFootprint getFloatFootprint(ldomNode * node, int d_left, int d_right, int d_top ) {
         // Returns the footprint of current floats over a final block
         // to be laid out at current c_y (+d_top).
-        // This footprint will be a set of floats to represent outer
-        // floats possibly having some impact over the final block
-        // about to be formatted.
-        // These floats can be either:
+        // This footprint is mainly a set of floats that represents outer
+        // floats possibly having some impact over the final block about to be
+        // formatted. It may also carry one active initial-letter exclusion.
+        //
+        // The float part can be either:
         // - real floats rectangles, when they are no more than 5
         //   and ALLOW_EXACT_FLOATS_FOOTPRINTS is enabled
         // - or "fake" floats ("footprints") embodying all floats
@@ -7619,7 +7696,15 @@ public:
         //   intersecting with this final block, but whose y sets
         //   the minimal y for the possible upcoming embedded floats.
         //
-        // Why at most "5" real floats?
+        // When a carried initial-letter is present, we keep it separate from
+        // these fake float footprints when we can spare an exact saved id slot:
+        // a later formatting can then rebuild its own dedicated exclusion
+        // geometry from that initial-letter inlineBox rect. It must stay a
+        // distinct obstacle, not a normal float rect: ordinary float clear
+        // semantics should not apply to it, and later real floats should not
+        // stack against a previous initial-letter as if it were an actual float.
+        //
+        // Why at most "5" exact saved ids?
         // Because I initially went with the "fake" floats solution,
         // because otherwise, storing references (per final block) to
         // a variable number of other floatBox nodes would need another
@@ -7633,16 +7718,23 @@ public:
         // the real floatBoxes node (which I can if they are no more
         // than 5), so we can fetch their real positions and dimensions
         // each time a final block is to be (re-)formatted, to allow
-        // for a nicer layout of text around these (at most 5) floats.
+        // for a nicer layout of text around these floats. One of these
+        // slots may also be used by a carried initial-letter inlineBox.
 
         // We need erm_final at level 1 (body, floatBox or inlineBox child)
         // to clear their own floats, to get them accounted in the document,
         // float, or inlineBox height, so they are fully contained in it and
         // don't overflow. (Level 0 can't be erm_final).
         bool no_clear_own_floats = (level > 1) && BLOCK_RENDERING(rend_flags, DO_NOT_CLEAR_OWN_FLOATS);
-        BlockFloatFootprint footprint = BlockFloatFootprint( this, d_left, d_top, no_clear_own_floats);
-        if (_floats.length() == 0) // zero footprint if no float
+        // We will handle cross-block initial-letter carry, the formatter
+        // will give us back the exclusion and doesn't need to grow its
+        // height to its ink bottom
+        bool no_clear_own_initial_letter = true;
+        BlockFloatFootprint footprint = BlockFloatFootprint( this, d_left, d_top,
+                                            no_clear_own_floats, no_clear_own_initial_letter );
+        if ( !hasActiveFloatFootprint() ) // no float, no initial letter
             return footprint;
+        bool allow_exact = BLOCK_RENDERING(rend_flags, ALLOW_EXACT_FLOATS_FOOTPRINTS);
         int top_y = c_y + d_top;
         int left_x = x_min + d_left;
         int right_x = x_max - d_right;
@@ -7664,7 +7756,7 @@ public:
         // printf("left_x = x_min %d + d_left %d = %d  top_y=%d\n", x_min, d_left, left_x, top_y);
         for (int i=0; i<_floats.length(); i++) {
             BlockFloat * flt = _floats[i];
-            if ( BLOCK_RENDERING(rend_flags, ALLOW_EXACT_FLOATS_FOOTPRINTS) ) {
+            if ( allow_exact ) {
                 // Ignore floats already passed by and possibly not yet removed
                 if (flt->bottom > top_y) {
                     if (floats_involved < 5) { // at most 5 slots
@@ -7726,12 +7818,54 @@ public:
                 }
             }
         }
-        if ( !isVertical() && floats_involved > 0 && floats_involved <= 5) {
+        if ( initial_letter_active && initial_letter_end_y > top_y ) {
+            // FlowState keeps only the inlineBox id: we must rebuild
+            // the formatter obstacle x/width/side from the current
+            // cached inlineBox geometry.
+            int abs_x;
+            int width;
+            int abs_end_y;
+            bool is_right;
+            if ( getInitialLetterInlineBoxExclusionById( node->getDocument(),
+                            initial_letter_id, abs_x, width, abs_end_y, is_right ) ) {
+                int exclusion_x = abs_x - left_x;
+                int exclusion_right = exclusion_x + width;
+                if ( exclusion_x < 0 )
+                    exclusion_x = 0;
+                if ( exclusion_right > final_width )
+                    exclusion_right = final_width;
+                if ( exclusion_right > exclusion_x ) {
+                    footprint.initial_letter_active = true;
+                    footprint.initial_letter_id = initial_letter_id;
+                    footprint.initial_letter_x = exclusion_x;
+                    footprint.initial_letter_width = exclusion_right - exclusion_x;
+                    footprint.initial_letter_is_right = is_right;
+                    // The carried exclusion end_y is already stored in the same
+                    // y-space as c_y, so just rebase it to this final block text top.
+                    footprint.initial_letter_end_y = initial_letter_end_y - top_y;
+                }
+            }
+        }
+        bool save_initial_letter_as_exact_id = footprint.initial_letter_active;
+        int exact_ids_involved = floats_involved + (save_initial_letter_as_exact_id ? 1 : 0);
+        bool use_exact_ids = allow_exact && exact_ids_involved > 0 && exact_ids_involved <= 5;
+        if ( !use_exact_ids && save_initial_letter_as_exact_id && _floats.length() == 0 ) {
+            // Even when exact float footprints are disabled, we can still use one
+            // saved id to preserve a carried initial-letter if no real floats are
+            // currently active: there is then no float footprint information to lose.
+            use_exact_ids = true;
+        }
+        if ( use_exact_ids && (save_initial_letter_as_exact_id || (!isVertical() && floats_involved > 0)) ) {
             // We can use floatIds
             footprint.use_floatIds = true;
             footprint.nb_floatIds = floats_involved;
-            // No need to call generateEmbeddedFloatsFromFloatIds() as we
-            // already computed them above.
+            if ( save_initial_letter_as_exact_id ) {
+                footprint.floatIds[footprint.nb_floatIds] = footprint.initial_letter_id;
+                footprint.nb_floatIds++;
+            }
+            // No need to call generateEmbeddedFloatsFromFloatIds() as we already
+            // computed the float rectangles above. If an initial-letter inlineBox id
+            // is present, restore() will rebuild its carried exclusion from it.
             /* Uncomment for checking reproducible results (here and below)
                footprint.generateEmbeddedFloatsFromFloatIds( node, final_width );
             */
@@ -7761,13 +7895,41 @@ public:
                 footprint.left_min_y = 0;
             if (footprint.right_min_y < 0 )
                 footprint.right_min_y = 0;
-            // Generate the float to transfer
+            if ( footprint.initial_letter_active ) {
+                // Rare fallback when we cannot spare one saved exact-id slot for
+                // the initial-letter inlineBox: clear below it by turning the
+                // top footprint into a full-width exclusion.
+                int clear_y = footprint.initial_letter_end_y;
+                if ( footprint.left_h < clear_y )
+                    footprint.left_h = clear_y;
+                if ( footprint.right_h > footprint.left_h )
+                    footprint.left_h = footprint.right_h;
+                footprint.left_w = final_width;
+                footprint.right_w = final_width;
+                footprint.right_h = footprint.left_h;
+                if ( footprint.left_min_y < clear_y )
+                    footprint.left_min_y = clear_y;
+                if ( footprint.right_min_y < clear_y )
+                    footprint.right_min_y = clear_y;
+                footprint.initial_letter_active = false;
+                footprint.initial_letter_id = 0;
+            }
+            // Generate the floats to transfer
             footprint.generateEmbeddedFloatsFromFootprints( final_width );
         }
         return footprint;
     }
 
 }; // Done with FlowState
+
+void BlockFloatFootprint::forwardFoundInitialLetter(lUInt32 node_id, bool carry_on, int end_y)
+{
+    formatted_initial_letter_id = node_id;
+    if ( carry_on && node_id != 0 && end_y > 0 ) {
+        formatted_initial_letter_carry_on = true;
+        formatted_initial_letter_carry_end_y = end_y;
+    }
+}
 
 // Register overflowing embedded floats into the main flow
 void BlockFloatFootprint::forwardOverflowingFloat( int x, int y, int w, int h, bool r, ldomNode * node )
@@ -7791,13 +7953,66 @@ void BlockFloatFootprint::generateEmbeddedFloatsFromFloatIds( ldomNode * node,  
     // RenderRectAccessor of the current node, and all the floats
     // that were associated to the node because of their involvement
     // in text layout.
+    // Most saved ids are floatBox nodes; one slot may also contain
+    // a carried initial-letter inlineBox so we can rebuild its
+    // dedicated exclusion geometry.
     lvRect rc;
     node->getAbsRect( rc, true ); // get formatted text abs coordinates
     int node_x = rc.left;
     int node_y = rc.top;
+    initial_letter_active = false;
+    initial_letter_id = 0;
+    initial_letter_end_y = 0;
+    initial_letter_x = 0;
+    initial_letter_width = 0;
+    initial_letter_is_right = false;
     floats_cnt = 0;
     for (int i=0; i<nb_floatIds; i++) {
         ldomNode * fbox = node->getDocument()->getTinyNode(floatIds[i]); // get node from its dataIndex
+        if ( !fbox ) {
+            crFatalError(145, "Missing saved float footprint node");
+        }
+        if ( fbox->getEffectiveNodeId() == el_inlineBox ) {
+            int abs_x;
+            int width;
+            int abs_end_y;
+            bool is_right;
+            if ( !getInitialLetterInlineBoxPseudoElem(fbox) ) {
+                crFatalError(146, "Saved float footprint inlineBox is not an initial-letter");
+            }
+            if ( !getInitialLetterInlineBoxExclusion(fbox, abs_x, width, abs_end_y, is_right) ) {
+                crFatalError(147, "Failed to rebuild saved initial-letter exclusion");
+            }
+            int x0 = abs_x - node_x;
+            int x1 = x0 + width;
+            if ( x0 < 0 )
+                x0 = 0;
+            else if ( x0 > final_width )
+                x0 = final_width;
+            if ( x1 < 0 )
+                x1 = 0;
+            else if ( x1 > final_width )
+                x1 = final_width;
+            int end_y = abs_end_y - node_y;
+            if ( end_y <= 0 ) {
+                crFatalError(148, "Saved initial-letter exclusion has invalid end_y");
+            }
+            if ( x1 <= x0 ) {
+                // This carried exclusion does not overlap the current final
+                // block width, so it has no effect on this block layout.
+                continue;
+            }
+            initial_letter_active = true;
+            initial_letter_id = floatIds[i];
+            initial_letter_end_y = end_y;
+            initial_letter_x = x0;
+            initial_letter_width = x1 - x0;
+            initial_letter_is_right = is_right;
+            continue;
+        }
+        if ( fbox->getEffectiveNodeId() != el_floatBox ) {
+            crFatalError(149, "Saved float footprint node has unexpected type");
+        }
         // The floatBox rect values should be exactly the same as what was
         // used in the flow's _floats when rendering. We can check if this
         // is not the case (so a bug) by uncommenting a few things below.
@@ -7929,6 +8144,12 @@ void BlockFloatFootprint::store(ldomNode * node)
     else {
         RENDER_RECT_UNSET_FLAG(fmt, NO_CLEAR_OWN_FLOATS);
     }
+    if ( no_clear_own_initial_letter ) {
+        RENDER_RECT_SET_FLAG(fmt, NO_CLEAR_OWN_INITIAL_LETTER);
+    }
+    else {
+        RENDER_RECT_UNSET_FLAG(fmt, NO_CLEAR_OWN_INITIAL_LETTER);
+    }
     fmt.push();
 }
 
@@ -7944,8 +8165,18 @@ void BlockFloatFootprint::restore(ldomNode * node, int final_width)
         fmt.getTopRectsExcluded( left_w, left_h, right_w, right_h );
         fmt.getNextFloatMinYs( left_min_y, right_min_y );
         generateEmbeddedFloatsFromFootprints( final_width );
+        // No exact carried initial-letter was saved on this path. If there had
+        // been one earlier, getFloatFootprint() already degraded it into a
+        // full-width clear footprint before storing these generic top rects.
+        initial_letter_active = false;
+        initial_letter_id = 0;
+        initial_letter_end_y = 0;
+        initial_letter_x = 0;
+        initial_letter_width = 0;
+        initial_letter_is_right = false;
     }
     no_clear_own_floats = RENDER_RECT_HAS_FLAG(fmt, NO_CLEAR_OWN_FLOATS);
+    no_clear_own_initial_letter = RENDER_RECT_HAS_FLAG(fmt, NO_CLEAR_OWN_INITIAL_LETTER);
 }
 
 int BlockFloatFootprint::getTopShiftX(int final_width, bool get_right_shift)
@@ -8933,6 +9164,14 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         break_before = RN_SPLIT_ALWAYS;
         break_after = RN_SPLIT_ALWAYS;
     }
+    // If we have a carried initial-letter still active, and we meet a block
+    // with HasFirstLetter (which may or may not be an initial-letter), clear
+    // that initial-letter (per-specs if initial-letter, otherwise not, but
+    // simpler to not check if it is (which is expensive) and do it in all
+    // cases, probably for the best).
+    if ( flow->hasCarriedInitialLetter() && enode->hasAttribute(attr_HasFirstLetter) ) {
+        flow->advancePastCarriedInitialLetter();
+    }
 
     if ( no_margin_collapse ) {
         // Push any earlier margin so it does not get collapsed with this one
@@ -9014,8 +9253,9 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         case erm_table:
             {
                 // As we don't support laying tables aside floats, just clear
-                // all floats and push all margins
+                // all floats, pass by any initial letter, and push all margins
                 flow->clearFloats( css_c_both );
+                flow->advancePastCarriedInitialLetter();
                 flow->pushVerticalMargin();
 
                 // We need to update the RenderRectAccessor() as renderTable will
@@ -9224,8 +9464,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                     if ( child->isText() ) {
                         // We may occasionally let empty text nodes among block elements,
                         // just skip them
-                        lString32 s = child->getText();
-                        if ( IsEmptySpace(s.c_str(), s.length() ) )
+                        if ( child->isWhitespaceText() )
                             continue;
                         crFatalError(144, "Attempting to render non-empty Text node");
                     }
@@ -9506,8 +9745,10 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 // margin now (and not delay it to the first addContentLine()).
                 // This can mess with proper margins collapsing if we were to
                 // output no content (we don't know that yet).
-                // So, do it only if we have floats.
-                if ( flow->hasActiveFloats() )
+                // So, do it only if we have an active float footprint:
+                // renderFinalBlock() must see the final post-margin absolute y
+                // before it stores that footprint's geometry.
+                if ( flow->hasActiveFloatFootprint() )
                     flow->pushVerticalMargin();
 
                 int inner_width = width - padding_left - padding_right;
@@ -9659,6 +9900,69 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 }
                 int final_min_y = float_footprint.getFinalMinY();
                 int final_max_y = float_footprint.getFinalMaxY();
+
+                lUInt32 carried_initial_letter_id = 0;
+                int carried_initial_letter_end_y = 0;
+                if ( float_footprint.formatted_initial_letter_id ) {
+                    // An initial-letter was discovered while formatting this block.
+                    // Emit any pending margin now (it would be done anyway when
+                    // AddContent*() the first content of this final block) before
+                    // recording the exclusion endpoint (this ensures that from now
+                    // on, all relevant coordinates - the final text top and the
+                    // initial-letter end y are in the same flow coordinate space,
+                    // and we can compute diffs).
+                    int next_split_before_flag = RN_SPLIT_AUTO;
+                    if ( padding_top == 0 && !isFootNoteBody && txform->GetLineCount() > 0
+                                          && (txform->GetLineInfo(0)->flags & LTEXT_LINE_SPLIT_AVOID_BEFORE) ) {
+                        next_split_before_flag = RN_SPLIT_AVOID;
+                    }
+                    flow->pushVerticalMargin(next_split_before_flag);
+
+                    ldomNode * initial_letter_inline_box = getInitialLetterInlineBoxById(enode->getDocument(),
+                                                                    float_footprint.formatted_initial_letter_id);
+                    if ( initial_letter_inline_box ) {
+                        // Initial-letter ink can extend beyond the formatter's own line box height,
+                        // so grow the final block overflow if that happens. As we can only get that
+                        // ink rect in abs coordinates, we must get our final rect abs coordinates
+                        // too (at this time, its x/y are set - they may be shifted later, but so
+                        // would the inlineBox: their difference will stay the same).
+                        lvRect final_abs_rect;
+                        enode->getAbsRect(final_abs_rect, true);
+                        lvRect initial_letter_abs_rect;
+                        if ( !getInitialLetterInlineBoxInkRect(initial_letter_inline_box, initial_letter_abs_rect) ) {
+                            // Fallback to the host inlineBox rect when precise ink geometry cannot be rebuilt;
+                            // it is less exact but still provides a safe conservative overflow bound.
+                            initial_letter_inline_box->getAbsRect(initial_letter_abs_rect);
+                        }
+                        int initial_letter_top = initial_letter_abs_rect.top - final_abs_rect.top;
+                        int initial_letter_bottom = initial_letter_abs_rect.bottom - final_abs_rect.top;
+                        if ( initial_letter_top < final_min_y ) {
+                            final_min_y = initial_letter_top;
+                        }
+                        if ( initial_letter_bottom > final_max_y ) {
+                            final_max_y = initial_letter_bottom;
+                        }
+                        // If formatting reported that our initial letter inline box overflows
+                        // its own rect, its exclusion must be carried onto following blocks.
+                        // (The above is about top and bottom ink overflows, used for drawing it,
+                        // this one is about the exclusion area affecting next rendering.)
+                        if ( float_footprint.formatted_initial_letter_carry_on ) {
+                            int final_text_top_in_flow = flow->getCurrentAbsoluteY() + padding_top;
+                            // Matches getFloatFootprint()'s top_y: convert between FlowState y-space
+                            // and the final block-local y-space used in BlockFloatFootprint.
+                            carried_initial_letter_id = float_footprint.formatted_initial_letter_id;
+                            carried_initial_letter_end_y = final_text_top_in_flow
+                                                         + float_footprint.formatted_initial_letter_carry_end_y;
+                            // We'll activate this (with flow->setCarriedInitialLetterExclusion()) below
+                            // when we are done with adding the lines (otherwise, its generic handling,
+                            // when AddContentLine() the first line, would wrongly add SPLIT_BEFORE_AVOID
+                            // to it; lvtextfm has itself set the correct SPLIT_BEFORE_AVOID on its
+                            // own lines passed by the initial letter exclusion).
+                        }
+                    }
+                }
+                // (If a previous carried exclusion has been passed over after this block height,
+                // it will be reset by any flow->addContent*() done below.)
 
                 flow->getPageContext()->updateRenderProgress(1);
                 #ifdef DEBUG_DUMP_ENABLED
@@ -9885,6 +10189,10 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                             }
                         }
                     }
+                }
+
+                if ( carried_initial_letter_id ) {
+                    flow->setCarriedInitialLetterExclusion(carried_initial_letter_id, carried_initial_letter_end_y);
                 }
 
                 // Leave footnote body before style height and padding, to get
@@ -10704,9 +11012,22 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
 }
 void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int doc_y, int width, int height, bool clip_to_target=true)
 {
-    // (The provided width and height gives the area we have to draw the background image on)
+    // The caller passes us the node's border box (fmt.getWidth()/getHeight()), for
+    // background-color's default background-clip: border-box. But background-position/-size
+    // resolve against the padding box (the default background-origin), so inset by the
+    // border width below -- see https://www.w3.org/TR/css-backgrounds-3/#the-background-origin
     css_style_ref_t style=enode->getStyle();
     if (!style->background_image.empty()) {
+        int leftBorderwidth = measureBorder(enode, 3);
+        int topBorderwidth = measureBorder(enode, 0);
+        int rightBorderwidth = measureBorder(enode, 1);
+        int bottomBorderwidth = measureBorder(enode, 2);
+        if (leftBorderwidth || topBorderwidth || rightBorderwidth || bottomBorderwidth) {
+            x0 += leftBorderwidth;
+            y0 += topBorderwidth;
+            width -= leftBorderwidth + rightBorderwidth;
+            height -= topBorderwidth + bottomBorderwidth;
+        }
         // FORK (vertical-rl): regular element background images need the same
         // doc-X/doc-Y to screen-Y/screen-X mapping as borders and background
         // colors. Keep body/canvas background drawing on the legacy path.
@@ -10725,10 +11046,14 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
         if (img.isNull()) { // filepath may be url-encoded
             img = enode->getParentNode()->getDocument()->getObjectImageSource(DecodeHTMLUrlString(filepath));
         }
-        if (!img.isNull()) {
-            // Native image size
-            int img_w =img->GetWidth();
-            int img_h =img->GetHeight();
+        if (!img.isNull() && width > 0 && height > 0) {
+            // Raw, undecoded-transform pixel size of the image file
+            int native_img_w = img->GetWidth();
+            int native_img_h = img->GetHeight();
+            // Native image size, scaled according to gRenderDPI like getStyledImageSize()
+            // does for <img> elements.
+            int img_w = scaleForRenderDPI(native_img_w);
+            int img_h = scaleForRenderDPI(native_img_h);
 
             // See if background-size specified and we need to adjust image native size
             // (if both auto, use image native size)
@@ -10738,9 +11063,10 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                  bg_h.type != css_val_unspecified || bg_h.value != css_generic_auto ) {
                 int new_w = 0;
                 int new_h = 0;
-                RenderRectAccessor fmt( enode );
-                int container_w = draw_vertical ? target_width : fmt.getWidth();
-                int container_h = draw_vertical ? target_height : fmt.getHeight();
+                // Use the (already border-inset) padding box as the basis for percentage
+                // sizes and for cover/contain scaling.
+                int container_w = width;
+                int container_h = draw_vertical ? target_height : height;
                 bool check_lengths = true;
                 if ( bg_w.type == css_val_unspecified && bg_h.type == css_val_unspecified ) {
                     if ( bg_w.value == css_generic_contain && bg_h.value == css_generic_contain ) {
@@ -10793,11 +11119,18 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                     // width or height computed to 0: nothing to draw
                     return;
                 }
-                if ( new_w != img_w || new_h != img_h ) {
-                    img = LVCreateStretchFilledTransform(img, new_w, new_h, IMG_TRANSFORM_STRETCH, IMG_TRANSFORM_STRETCH, 0, 0);
-                    img_w = new_w;
-                    img_h = new_h;
-                }
+                img_w = new_w;
+                img_h = new_h;
+            }
+            // Resize the decoded image to img_w x img_h if that doesn't match its
+            // native pixel size, whether because of background-size, of gRenderDPI
+            // scaling, or both (img_w/img_h above already account for either).
+            // Honor the same "Image Scaling" (smooth vs nearest-neighbor) setting
+            // used for normal <img> elements, so background-image scaling looks
+            // consistent with the rest of the page.
+            if ( img_w != native_img_w || img_h != native_img_h ) {
+                img = LVCreateStretchFilledTransform(img, img_w, img_h, IMG_TRANSFORM_STRETCH, IMG_TRANSFORM_STRETCH, 0, 0,
+                                                      drawbuf.getSmoothScalingImages());
             }
 
             // We can use some crengine facilities for background repetition and position,
@@ -10839,45 +11172,22 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                     break;
             }
             // Compute the position where to draw top left of image, as if
-            // it was a single image when no-repeat
-            int draw_x = 0;
-            int draw_y = 0;
-            switch (style->background_position) {
-                case css_background_left_top:
-                case css_background_left_center:
-                case css_background_left_bottom:
-                    break;
-                case css_background_center_top:
-                case css_background_center_center:
-                case css_background_center_bottom:
-                    draw_x = (target_width - img_w)/2;
-                    break;
-                case css_background_right_top:
-                case css_background_right_center:
-                case css_background_right_bottom:
-                    draw_x = target_width - img_w;
-                    break;
-                default:
-                    break;
-            }
-            switch (style->background_position) {
-                case css_background_left_top:
-                case css_background_center_top:
-                case css_background_right_top:
-                    break;
-                case css_background_left_center:
-                case css_background_center_center:
-                case css_background_right_center:
-                    draw_y = (target_height - img_h)/2;
-                    break;
-                case css_background_left_bottom:
-                case css_background_center_bottom:
-                case css_background_right_bottom:
-                    draw_y = target_height - img_h;
-                    break;
-                default:
-                    break;
-            }
+            // it was a single image when no-repeat.
+            // Per spec, a <percentage> position is relative to the difference
+            // between the container and (possibly background-size resized)
+            // image sizes, while a <length> is a plain absolute offset.
+            css_length_t bg_pos_x = style->background_position[0];
+            css_length_t bg_pos_y = style->background_position[1];
+            int draw_x;
+            if ( bg_pos_x.type == css_val_percent )
+                draw_x = (target_width - img_w) * bg_pos_x.value / (100 * 256);
+            else
+                draw_x = lengthToPx(enode, bg_pos_x, target_width);
+            int draw_y;
+            if ( bg_pos_y.type == css_val_percent )
+                draw_y = (target_height - img_h) * bg_pos_y.value / (100 * 256);
+            else
+                draw_y = lengthToPx(enode, bg_pos_y, target_height);
             // If tiling, we need to adjust the transform x/y (the offset
             // in img, so, a value between 0 and img_w/h) to the point
             // inside image that should be at top left of target area
@@ -11009,7 +11319,7 @@ void DrawBodyBackground( LVDrawBuf & drawbuf, bool draw_bg_color, bool draw_bg_i
     // or starts inside this page/screen: we may have inter body margins, or
     // some initial top margin above the first body.
     // We need to check there is really none to be able to draw on the whole buffer.
-    bool no_visible_previous_body = doc_y <= 0; // This body started before page top
+    const bool no_visible_previous_body = doc_y <= 0; // This body started before page top
     if ( !no_visible_previous_body ) {
         // Find previous body if any, to see if would have some part in this page
         // We expect either sibling BODY (FB2) or sibling DocFragement>BODY (EPUB)
@@ -11031,22 +11341,17 @@ void DrawBodyBackground( LVDrawBuf & drawbuf, bool draw_bg_color, bool draw_bg_i
                 }
             }
         }
-        if ( !prevBody ) {
-            no_visible_previous_body = true;
-        }
-        else {
+        if ( prevBody ) {
             // Make out the doc_y this prev body would have
             lvRect prevrect;
             prevBody->getAbsRect(prevrect);
             lvRect thisrect;
             enode->getAbsRect(thisrect);
             int prev_bottom_doc_y = doc_y - thisrect.top + prevrect.bottom;
-            if ( prev_bottom_doc_y <= 0 ) { // previous body ends before this page
-                no_visible_previous_body = true;
-            }
-            else {
-                // There may be unused space between this prev body bottom and
-                // this body top, caused by collapsed body top/bottom margins.
+            if ( prev_bottom_doc_y > 0 ) {
+                // Previous body does not end before this page: there may be unused
+                // space between this prev body bottom and this body top, caused by
+                // collapsed body top/bottom margins.
                 // Make the boundary between backgrounds at the middle of this (round up)
                 bg_top = y0 + doc_y - (thisrect.top - prevrect.bottom)/2;
             }
@@ -11054,7 +11359,7 @@ void DrawBodyBackground( LVDrawBuf & drawbuf, bool draw_bg_color, bool draw_bg_i
     }
     // Same checks as above, but for a next body below this one
     RenderRectAccessor fmt( enode );
-    bool no_visible_next_body = doc_y + fmt.getHeight() >= dy; // this body ends after page bottom
+    const bool no_visible_next_body = doc_y + fmt.getHeight() >= dy; // this body ends after page bottom
     if ( !no_visible_next_body ) {
         // Find next body
         ldomNode * nextBody = NULL;
@@ -11075,21 +11380,16 @@ void DrawBodyBackground( LVDrawBuf & drawbuf, bool draw_bg_color, bool draw_bg_i
                 }
             }
         }
-        if ( !nextBody ) {
-            no_visible_next_body = true;
-        }
-        else {
+        if ( nextBody ) {
             lvRect nextrect;
             nextBody->getAbsRect(nextrect);
             lvRect thisrect;
             enode->getAbsRect(thisrect);
             int next_top_doc_y = doc_y - thisrect.top + nextrect.top;
-            if ( next_top_doc_y >= dy ) { // next body starts after this page
-                no_visible_next_body = true;
-            }
-            else {
-                // There may be unused space between this next body top and
-                // this body bottom, caused by collapsed body top/bottom margins
+            if ( next_top_doc_y < dy ) {
+                // Next body starts on this page: There may be unused space
+                // between this next body top and this body bottom, caused by
+                // collapsed body top/bottom margins.
                 // Make the boundary between backgrounds at the middle of this (round down)
                 bg_bottom = y0 + doc_y + fmt.getHeight() + (nextrect.top - thisrect.bottom + 1)/2;
             }
@@ -12348,7 +12648,6 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
     UPDATE_STYLE_FIELD( page_break_after, css_pb_inherit );
     UPDATE_STYLE_FIELD( page_break_inside, css_pb_inherit );
     UPDATE_STYLE_FIELD( background_repeat, css_background_r_inherit );
-    UPDATE_STYLE_FIELD( background_position, css_background_p_inherit );
     UPDATE_STYLE_FIELD( float_, css_f_inherit );
     UPDATE_STYLE_FIELD( clear, css_c_inherit );
     UPDATE_STYLE_FIELD( box_sizing, css_bs_inherit );
@@ -12633,6 +12932,9 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
     // background_size[2] [WH]: computed value: "as specified, but with relative lengths converted into absolute lengths"
     inheritLength( pstyle->background_size[0], parent_style->background_size[0], parent_font_size );
     inheritLength( pstyle->background_size[1], parent_style->background_size[1], parent_font_size );
+    // background_position[2] [XY]: computed value: "as specified, but with relative lengths converted into absolute lengths"
+    inheritLength( pstyle->background_position[0], parent_style->background_position[0], parent_font_size );
+    inheritLength( pstyle->background_position[1], parent_style->background_position[1], parent_font_size );
 
     // border_width[4] [TRBL]: computed value: "the absolute length or 0 if border-style is none or hidden"
     if ( pstyle->border_width[0].type == css_val_inherited ) {
