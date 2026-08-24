@@ -1090,6 +1090,7 @@ bool ImportEpubDocument( LVStreamRef stream, ldomDocument * m_doc, LVDocViewCall
     lString32 pageMapHref; // epub2 Adobe page-map
     lString32 pageMapSource;
     lString32 coverId;
+    bool primaryWritingModeVerticalRL = false;
 
     // Read OPF file
     {
@@ -1113,6 +1114,22 @@ bool ImportEpubDocument( LVStreamRef stream, ldomDocument * m_doc, LVDocViewCall
         int nb_metadata_items = (metadata && metadata->isElement()) ? metadata->getChildCount() : 0;
         ldomNode * manifest = doc->nodeFromXPath(lString32("package/manifest"));
         int nb_manifest_items = (manifest && manifest->isElement()) ? manifest->getChildCount() : 0;
+
+        // Kindle-compatible EPUB metadata. This is a document default, not an
+        // author stylesheet: explicit writing-mode on a fragment/body must win.
+        lUInt16 meta_id = doc->getElementNameIndex(U"meta");
+        for (int i = 0; i < nb_metadata_items; i++) {
+            ldomNode * item = metadata->getChildNode(i);
+            if (item->getNodeId() != meta_id
+                    || item->getAttributeValue("name") != "primary-writing-mode")
+                continue;
+            lString32 content = item->getAttributeValue("content");
+            content.lowercase();
+            if (content == "vertical-rl") {
+                primaryWritingModeVerticalRL = true;
+                break;
+            }
+        }
 
         if ( decryptor->hasAdobeObfuscatedItems() ) {
             // There may be multiple <dc:identifier> tags, one of which (urn:uuid:...) being used
@@ -1252,7 +1269,6 @@ bool ImportEpubDocument( LVStreamRef stream, ldomDocument * m_doc, LVDocViewCall
         bool hasSeriesMeta = false;
         bool hasSeriesIdMeta = false;
         // Iterate all package/metadata/meta
-        lUInt16 meta_id = doc->getElementNameIndex(U"meta");
         for (int i=0; i<nb_metadata_items; i++) {
             ldomNode * item = metadata->getChildNode(i);
             if ( item->getNodeId() != meta_id )
@@ -1593,7 +1609,10 @@ bool ImportEpubDocument( LVStreamRef stream, ldomDocument * m_doc, LVDocViewCall
     // Build a single DOM from all the spine items (each contained in a <DocFragment> internal element)
     ldomDocumentFragmentWriter appender(&writer, cs32("body"), cs32("DocFragment"), lString32::empty_str );
     writer.OnStart(NULL);
-    writer.OnTagOpenNoAttr(U"", U"body");
+    writer.OnTagOpen(U"", U"body");
+    if (primaryWritingModeVerticalRL)
+        writer.OnAttribute(U"", U"style", U"writing-mode: vertical-rl");
+    writer.OnTagBody();
     int fragmentCount = 0;
     size_t spineItemsNb = spineItems.length();
     for ( size_t i=0; i<spineItemsNb; i++ ) {
