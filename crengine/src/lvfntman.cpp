@@ -4943,22 +4943,24 @@ public:
                                 // to a common capsule baseline.
                                 //
                                 // Punctuation (、。), brackets (「」 etc.) and other glyphs
-                                // whose in-slot position IS by design fall through to the
-                                // vmtx-based path: 、。 anchor at the bottom-right of the
-                                // virtual body (hanging close to the preceding character,
-                                // JLReq end-of-line half-em compaction), brackets follow corner conventions.
+                                // whose in-slot position IS by design keep their vmtx X
+                                // placement: 、。 anchor at the bottom-right of the virtual
+                                // body (hanging close to the preceding character, JLReq
+                                // end-of-line half-em compaction), brackets follow corner
+                                // conventions. Their Y placement uses the same common
+                                // baseline as ordinary CJK below.
                                 // HarfBuzz TTB writes x_offset = −vertOriginX and y_offset
                                 // = −vertOriginY into glyph_pos[] (compensation for an
-                                // LTR-style pen) — we place the pen at the vertical origin
-                                // ourselves and read vBX/vBY from our own cache, so
-                                // HarfBuzz's offsets must NOT be added on top — that would
-                                // double-displace the glyph.
+                                // LTR-style pen). We place the pen ourselves and read vBX
+                                // from our own cache (and retain vBY for multi-em/fallback
+                                // glyphs), so HarfBuzz's offsets must NOT be added on top.
                                 if (is_vertical_draw) {
                                     // LuaTeX-ja-style placement has two paths:
                                     //
                                     //   body CJK: a common 1em capsule, using horizontal
                                     //             glyph extents and one shared ascender
-                                    //   punctuation: vmtx origin plus the JFM cwa shift
+                                    //   exceptional glyphs: vmtx X origin, common capsule
+                                    //                        baseline plus the JFM cwa shift
                                     //
                                     // where:
                                     //
@@ -4981,10 +4983,11 @@ public:
                                     //   [6] exclam/quest             align=left  , fwidth=em   → cwa=0
                                     //   [7] halfwidth kana           align=left  , fwidth=em/2 → cwa=0
                                     //
-                                    // vBY is used only for punctuation, brackets and other
-                                    // exceptional classes whose corner/slot position is part
-                                    // of the font design. Ordinary body glyphs use the common
-                                    // capsule baseline below.
+                                    // vBX is retained for punctuation, brackets and other
+                                    // exceptional classes whose cross-column position is part
+                                    // of the font design. Ordinary, normal-advance classes use
+                                    // the common capsule baseline in the advance direction;
+                                    // multi-em alternates retain their vmtx Y placement.
                                     lChar32 cluster_char = 0;
                                     lUInt32 cluster_idx = glyph_info[i].cluster;
                                     if (cluster_idx < (lUInt32)len)
@@ -5046,7 +5049,57 @@ public:
                                                 glyph_info[i].codepoint, vm)) {
                                             int col_center = x + _size / 2;
                                             gx = col_center + vm.origin_x;
-                                            gy = y + vm.origin_y + cwa;
+                                            // Keep the advance-axis origin on the same
+                                            // baseline as ordinary CJK.  Mixing the old
+                                            // vmtx vertBearingY coordinate with the body
+                                            // capsule baseline makes punctuation visibly
+                                            // drift in fonts whose vertical and horizontal
+                                            // metrics use different origins (Noto Serif JP
+                                            // is one such example).  The glyph's own
+                                            // outline bearing still determines its designed
+                                            // in-slot shape; cwa preserves the JLReq
+                                            // compaction/anchoring for each punctuation
+                                            // class.
+                                            VertBodyGlyphMetrics body_metrics;
+                                            // Multi-em vertical alternates (for example
+                                            // kana repeat marks and some dash composites)
+                                            // deliberately use a distinct vertical origin.
+                                            // Keep their existing vmtx placement.
+                                            bool is_normal_vertical_advance = vert_natural_adv
+                                                <= (_size * 3) / 2;
+                                            if (is_normal_vertical_advance
+                                                    && _vert_body_metrics_cache.get(_hb_font,
+                                                        glyph_info[i].codepoint, body_metrics)) {
+                                                // Add cwa before the sole final rounding so
+                                                // the common baseline and JFM shift share one
+                                                // coordinate system.
+                                                lInt64 gy_26_6 = (lInt64)y * 64
+                                                    + body_metrics.ascender
+                                                    - body_metrics.y_bearing
+                                                    + (lInt64)cwa * 64;
+                                                gy = roundFontMetricToPixel(gy_26_6);
+                                                if (logVerticalCapsules()) {
+                                                    lInt64 baseline_y_rel_26_6 = gy_26_6
+                                                        - (lInt64)y * 64
+                                                        + body_metrics.y_bearing
+                                                        - (lInt64)cwa * 64;
+                                                    fprintf(stderr,
+                                                        "VERT_CAPSULE U+%04X gid=%u "
+                                                        "class=%d "
+                                                        "baseline_y_rel_26_6=%lld "
+                                                        "cwa=%d gx=%d gy=%d\n",
+                                                        (unsigned int)cluster_char,
+                                                        (unsigned int)glyph_info[i].codepoint,
+                                                        (int)vert_class,
+                                                        (long long)baseline_y_rel_26_6,
+                                                        cwa, gx, gy);
+                                                }
+                                            } else {
+                                                // Preserve vmtx placement for multi-em
+                                                // alternates and when HarfBuzz cannot
+                                                // provide outline extents.
+                                                gy = y + vm.origin_y + cwa;
+                                            }
                                         } else {
                                             // No vmtx: bitmap-centre X, slot-edge Y with
                                             // cwa shift. This path is for punctuation and
