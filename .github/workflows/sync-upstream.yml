@@ -5,11 +5,16 @@ on:
     - cron: '0 8 * * 5'  # Friday at 08:00 UTC (17:00 JST)
   workflow_dispatch:
 
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
       issues: write
     steps:
       - uses: actions/checkout@v4
@@ -24,30 +29,78 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
 
-      - name: Merge from upstream crengine
+      - name: Prepare upstream-sync pull request
         run: |
           git remote add upstream https://github.com/koreader/crengine.git
           git fetch upstream master
+          git fetch origin master
+          git fetch origin upstream-sync/master || true
+          git checkout -B upstream-sync/master origin/master
 
-          # Merge upstream into our master (which contains vertical-rl changes)
           if ! git merge upstream/master --no-edit; then
+            CONFLICTS="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
             git merge --abort
             echo "MERGE_FAILED=true" >> $GITHUB_ENV
+            echo "MERGE_CONFLICTS=$CONFLICTS" >> $GITHUB_ENV
+            exit 0
           fi
 
-      - name: Push
-        if: env.MERGE_FAILED != 'true'
-        run: git push origin master
+          if git diff --quiet origin/master..HEAD; then
+            echo "NO_UPSTREAM_CHANGES=true" >> $GITHUB_ENV
+            exit 0
+          fi
 
-      - name: Create issue on merge conflict
+          git push --force-with-lease origin HEAD:upstream-sync/master
+          echo "SYNC_BRANCH=upstream-sync/master" >> $GITHUB_ENV
+
+      - name: Create or update upstream-sync pull request
+        if: env.MERGE_FAILED != 'true' && env.NO_UPSTREAM_CHANGES != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Upstream sync: koreader/crengine';
+            const body = `Automated merge candidate from \`koreader/crengine:master\`.\n\nReview the fork-only boundaries and CI before merging.\n\nWorkflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:upstream-sync/master`,
+            });
+            if (pulls.length) {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pulls[0].number,
+                title,
+                body,
+              });
+            } else {
+              await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                head: process.env.SYNC_BRANCH,
+                base: 'master',
+                body,
+              });
+            }
+
+      - name: Create or update issue on merge conflict
         if: env.MERGE_FAILED == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.issues.create({
+            const title = 'Upstream sync blocked: merge conflict';
+            const body = `Automatic merge from \`koreader/crengine:master\` is blocked.\n\nConflicting paths: \`${process.env.MERGE_CONFLICTS}\`\n\nResolve this against the current fork head, then close this issue.\n\nWorkflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: 'Upstream sync failed: merge conflict',
-              body: 'Automatic sync from koreader/crengine failed due to a merge conflict. Manual resolution required.\n\nWorkflow run: ' + context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId,
-              labels: ['upstream-sync'],
+              state: 'open',
+              labels: 'upstream-sync',
             });
+            const issue = issues.find(issue => issue.title === title);
+            if (issue) {
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body });
+            } else {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body, labels: ['upstream-sync'] });
+            }
