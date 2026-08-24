@@ -162,6 +162,7 @@ enum css_decl_code {
     cssd_direction,
     cssd_writing_mode,
     cssd_writing_mode2, // -webkit-writing-mode (vendor-prefixed alias used by many EPUBs)
+    cssd_writing_mode3, // -epub-writing-mode (legacy EPUB alias)
     cssd_text_orientation,
     cssd_text_combine_upright,
     cssd_text_combine_upright2,
@@ -309,6 +310,7 @@ static const char * css_decl_name[] = {
     "direction",
     "writing-mode",
     "-webkit-writing-mode",
+    "-epub-writing-mode",
     "text-orientation",
     "text-combine-upright",
     "-epub-text-combine",
@@ -5285,6 +5287,7 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                 break;
             case cssd_writing_mode:
             case cssd_writing_mode2: // -webkit-writing-mode
+            case cssd_writing_mode3: // -epub-writing-mode
                 IF_g_SET_n_AND_break(true, css_wm_inherit, css_wm_horizontal_tb);
                 n = parse_name( decl, css_wm_names, -1 );
                 // vertical-lr is rendered as vertical-rl (unsupported): the fork's
@@ -6326,6 +6329,7 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
             break;
         case cssd_writing_mode:
         case cssd_writing_mode2: // -webkit-writing-mode
+        case cssd_writing_mode3: // -epub-writing-mode
             {
                 css_writing_mode_t wm_val = (css_writing_mode_t) *p++;
                 style->Apply( wm_val, &style->writing_mode, imp_bit_writing_mode, is_important );
