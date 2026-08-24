@@ -24,59 +24,6 @@
 #include "../include/lvstyles.h"
 #include "../include/lvthread.h"
 
-#if (USE_FREETYPE==1)
-// Paint CSS text decorations for a run laid out on a vertical inline axis.
-// All font implementations route through this helper so FreeType, small-caps
-// and synthetic-bold runs use identical geometry. `target_h` carries the
-// decoration owner's physical edge when the corresponding hint is set.
-static bool drawVerticalTextDecorations(
-        LVDrawBuf * buf, int x, int y, int width, int advance,
-        int font_size, int font_height, int thickness,
-        int text_decoration_back_gap, int target_h, lUInt32 flags)
-{
-    bool rotated = flags & LFNT_HINT_RENDER_ROTATE_FOR_VERTICAL;
-    bool upright = flags & LFNT_HINT_IS_VERTICAL;
-    bool vertical_edge = flags & LFNT_HINT_VERTICAL_DECORATION_EDGE;
-    // TCY keeps its glyphs horizontal, but its decoration still belongs to
-    // the vertical line. The resolved decoration edge is therefore also an
-    // explicit vertical-context hint, independent of glyph orientation.
-    if ( !(flags & LFNT_DRAW_DECORATION_MASK)
-            || (!rotated && !upright && !vertical_edge) )
-        return false;
-
-    int owner_thickness = (flags & LFNT_HINT_VERTICAL_DECORATION_THICKNESS_MASK)
-            >> LFNT_HINT_VERTICAL_DECORATION_THICKNESS_SHIFT;
-    if ( owner_thickness > 0 )
-        thickness = owner_thickness;
-    int cross_extent = rotated ? font_height : font_size;
-    int extent = width >= 0 ? width : (rotated ? advance : font_size);
-    int y0 = y - text_decoration_back_gap;
-    int y1 = y + extent;
-    lUInt32 color = buf->GetTextColor();
-    if ( flags & LFNT_DRAW_UNDERLINE ) {
-        int inline_end = (flags & LFNT_HINT_VERTICAL_DECORATION_EDGE)
-                ? target_h : x + cross_extent;
-        // In vertical-rl, an underline is painted on the right (under) side.
-        // The caller resolves this start coordinate from the decoration owner
-        // (including overlap with a coincident inline-end border).
-        buf->FillRect(inline_end, y0, inline_end + thickness, y1, color);
-    }
-    if ( flags & LFNT_DRAW_OVERLINE ) {
-        int inline_start = (flags & LFNT_HINT_VERTICAL_DECORATION_EDGE)
-                ? target_h : x;
-        // In vertical-rl, an overline is painted on the left (over) side.
-        // Resolve it from the decoration owner just like the right-side
-        // underline, so nested font-size changes cannot kink the rule.
-        buf->FillRect(inline_start, y0, inline_start + thickness, y1, color);
-    }
-    if ( flags & LFNT_DRAW_LINE_THROUGH ) {
-        int line_x = x + (cross_extent - thickness) / 2;
-        buf->FillRect(line_x, y0, line_x + thickness, y1, color);
-    }
-    return true;
-}
-#endif
-
 // Uncomment for debugging text measurement or drawing
 // #define DEBUG_MEASURE_TEXT
 // #define DEBUG_DRAW_TEXT

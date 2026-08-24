@@ -21,6 +21,16 @@
 struct FT_FaceRec_;
 typedef struct FT_FaceRec_ * FT_Face;
 typedef struct hb_font_t hb_font_t;
+class LVDrawBuf;
+
+// Paint CSS text decorations for a run laid out on a vertical inline axis.
+// Kept in the fork-only implementation so the upstream font manager only
+// retains its call sites. `target_h` is the decoration owner's physical edge
+// when the corresponding hint is set.
+bool drawVerticalTextDecorations(
+        LVDrawBuf * buf, int x, int y, int width, int advance,
+        int font_size, int font_height, int thickness,
+        int text_decoration_back_gap, int target_h, lUInt32 flags);
 
 struct VertGlyphMetrics {
     lInt16  origin_x;   // vertBearingX in pixels
