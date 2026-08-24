@@ -4708,8 +4708,13 @@ public:
                         fb_flags &= ~LFNT_HINT_BEGINS_PARAGRAPH;
                     if (fb_t_end < len)
                         fb_flags &= ~LFNT_HINT_ENDS_PARAGRAPH;
-                    // Adjust fallback y so baselines of both fonts match
-                    int fb_y = y + _baseline - fallback->getBaseline();
+                    // Horizontal fallback runs share a baseline. Vertical TTB
+                    // runs instead share the character-slot origin: their vmtx
+                    // metrics are relative to y, so applying the horizontal
+                    // baseline delta moves only the fallback glyph layer.
+                    int fb_y = is_vertical_draw
+                        ? y
+                        : y + _baseline - fallback->getBaseline();
                     bool fb_addHyphen = false; // will be added by main font
                     const lChar32 * fb_text = text + fb_t_start;
                     int fb_len = fb_t_end - fb_t_start;
@@ -4952,9 +4957,20 @@ public:
                                                 + ((lInt64)_size * 64
                                                    - body_metrics.h_advance) / 2
                                                 + body_metrics.x_bearing;
-                                            lInt64 gy_26_6 = (lInt64)y * 64
-                                                + body_metrics.ascender
-                                                - body_metrics.y_bearing;
+                                            // The caller's y is the top of the same
+                                            // vertical character slot used by selection
+                                            // rectangles and replaced elements.  Preserve
+                                            // the font's TTB origin relative to that slot;
+                                            // applying the horizontal ascender/bearing here
+                                            // shifts glyph ink alone (about 0.3em in the
+                                            // target EPUB).
+                                            VertGlyphMetrics vm;
+                                            int vertical_origin_y =
+                                                _vert_metrics_cache.get(_face,
+                                                    glyph_info[i].codepoint, vm)
+                                                ? vm.origin_y : 0;
+                                            lInt64 gy_26_6 = ((lInt64)y
+                                                + vertical_origin_y) * 64;
                                             gx = roundFontMetricToPixel(gx_26_6);
                                             gy = roundFontMetricToPixel(gy_26_6);
                                             if (logVerticalCapsules()) {
@@ -4972,11 +4988,12 @@ public:
                                                     "VERT_CAPSULE U+%04X gid=%u "
                                                     "axis_x_rel_26_6=%lld "
                                                     "baseline_y_rel_26_6=%lld "
-                                                    "gx=%d gy=%d\n",
+                                                    "vby=%d gx=%d gy=%d\n",
                                                     (unsigned int)cluster_char,
                                                     (unsigned int)glyph_info[i].codepoint,
                                                     (long long)axis_x_rel_26_6,
                                                     (long long)baseline_y_rel_26_6,
+                                                    vertical_origin_y,
                                                     gx, gy);
                                             }
                                         } else {
@@ -4984,9 +5001,7 @@ public:
                                             // cached metrics as a compatibility fallback.
                                             gx = x + (_size - (int)item->advance) / 2
                                                 + item->origin_x;
-                                            gy = y + FONT_METRIC_TO_PX(
-                                                _face->size->metrics.ascender)
-                                                - item->origin_y;
+                                            gy = y;
                                         }
                                     } else {
                                         int cwa = getJLReqVertCwa(cluster_char, _size,
@@ -4996,57 +5011,7 @@ public:
                                                 glyph_info[i].codepoint, vm)) {
                                             int col_center = x + _size / 2;
                                             gx = col_center + vm.origin_x;
-                                            // Keep the advance-axis origin on the same
-                                            // baseline as ordinary CJK.  Mixing the old
-                                            // vmtx vertBearingY coordinate with the body
-                                            // capsule baseline makes punctuation visibly
-                                            // drift in fonts whose vertical and horizontal
-                                            // metrics use different origins (Noto Serif JP
-                                            // is one such example).  The glyph's own
-                                            // outline bearing still determines its designed
-                                            // in-slot shape; cwa preserves the JLReq
-                                            // compaction/anchoring for each punctuation
-                                            // class.
-                                            VertBodyGlyphMetrics body_metrics;
-                                            // Multi-em vertical alternates (for example
-                                            // kana repeat marks and some dash composites)
-                                            // deliberately use a distinct vertical origin.
-                                            // Keep their existing vmtx placement.
-                                            bool is_normal_vertical_advance = vert_natural_adv
-                                                <= (_size * 3) / 2;
-                                            if (is_normal_vertical_advance
-                                                    && _vert_body_metrics_cache.get(_hb_font,
-                                                        glyph_info[i].codepoint, body_metrics)) {
-                                                // Add cwa before the sole final rounding so
-                                                // the common baseline and JFM shift share one
-                                                // coordinate system.
-                                                lInt64 gy_26_6 = (lInt64)y * 64
-                                                    + body_metrics.ascender
-                                                    - body_metrics.y_bearing
-                                                    + (lInt64)cwa * 64;
-                                                gy = roundFontMetricToPixel(gy_26_6);
-                                                if (logVerticalCapsules()) {
-                                                    lInt64 baseline_y_rel_26_6 = gy_26_6
-                                                        - (lInt64)y * 64
-                                                        + body_metrics.y_bearing
-                                                        - (lInt64)cwa * 64;
-                                                    fprintf(stderr,
-                                                        "VERT_CAPSULE U+%04X gid=%u "
-                                                        "class=%d "
-                                                        "baseline_y_rel_26_6=%lld "
-                                                        "cwa=%d gx=%d gy=%d\n",
-                                                        (unsigned int)cluster_char,
-                                                        (unsigned int)glyph_info[i].codepoint,
-                                                        (int)vert_class,
-                                                        (long long)baseline_y_rel_26_6,
-                                                        cwa, gx, gy);
-                                                }
-                                            } else {
-                                                // Preserve vmtx placement for multi-em
-                                                // alternates and when HarfBuzz cannot
-                                                // provide outline extents.
-                                                gy = y + vm.origin_y + cwa;
-                                            }
+                                            gy = y + vm.origin_y + cwa;
                                         } else {
                                             // No vmtx: bitmap-centre X, slot-edge Y with
                                             // cwa shift. This path is for punctuation and
