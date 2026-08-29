@@ -2195,7 +2195,12 @@ bool getVerticalDecorationMetrics(formatted_text_fragment_t * pbuffer,
     if ( column_width < reference_em )
         column_width = reference_em;
     metrics.inline_start = line_x - (column_width + reference_em) / 2;
-    metrics.inline_end = line_x;
+    // Decorations hug the character frame, not the outer line-height box.
+    // A 24px glyph in a 36px vertical line is centred with 6px on either
+    // side; its right sideline belongs at line_x - 6. Ruby bases use their
+    // own tight line box, so this gives identical coordinates with or
+    // without ruby instead of creating a 6px step at every ruby boundary.
+    metrics.inline_end = line_x - (column_width - reference_em) / 2;
     return true;
 }
 
