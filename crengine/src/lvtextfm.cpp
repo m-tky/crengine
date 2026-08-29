@@ -7243,6 +7243,24 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         buf->SetBackgroundColor( bgcl );
                     // Add drawing flags: text decoration (underline...)
                     lUInt32 drawFlags = srcline->flags & LTEXT_TD_MASK;
+                    // text-decoration is propagated through inline descendants
+                    // in the legacy style data, but CSS ruby decorations belong
+                    // to the ruby base, not to its annotation.  In vertical text
+                    // the inherited annotation rule is especially visible as a
+                    // second, outboard sideline.  Keep the base's line_x for both
+                    // ordinary text and ruby bases by dropping that propagated
+                    // decoration while painting <rt>/<rtc>/<rp> content.
+                    if ( is_vertical && drawFlags ) {
+                        ldomNode * decoration_node = (ldomNode *)srcline->object;
+                        for ( ; decoration_node;
+                                decoration_node = decoration_node->getParentNode() ) {
+                            if ( decoration_node->isElement()
+                                    && isRubyAnnotId(decoration_node->getNodeId()) ) {
+                                drawFlags &= ~LTEXT_TD_MASK;
+                                break;
+                            }
+                        }
+                    }
                     // and chars direction, and if word begins or ends paragraph (for Harfbuzz)
                     drawFlags |= WORD_FLAGS_TO_FNT_FLAGS(word->flags);
                     // For debugging, to visually see overlap/italic correction:
