@@ -902,6 +902,12 @@ void alignLineHorizontalVerticalPostPass( LVFormatter* fmt, formatted_line_t * f
                         vert_y_adjust = (col_w + em) / 2 - box_h;  // centred
                     else
                         vert_y_adjust = col_w - box_h; // fallback
+                } else if ( node->getChildCount() == 1
+                        && node->getChildNode(0)->isEffectiveImage() ) {
+                    // Keep a large inline-block image on the current column;
+                    // the generic negative overhang below moves it off-page.
+                    if ( col_w > box_h )
+                        vert_y_adjust = (col_w - box_h) / 2;
                 } else if ( col_w > box_h ) {
                     vert_y_adjust = (col_w - box_h) / 2;  // centre small box
                 } else if ( box_h > col_w ) {
