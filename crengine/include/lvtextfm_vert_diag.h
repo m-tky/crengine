@@ -41,6 +41,9 @@ extern int ltext_vert_exact_hanging_last_regular_bottom;
 extern int ltext_vert_exact_hanging_last_active_bottom;
 extern int ltext_vert_exact_hanging_last_glyph_top;
 extern int ltext_vert_exact_hanging_last_glyph_bottom;
+extern int ltext_vert_fallback_size_sample_count;
+extern int ltext_vert_fallback_size_mismatch_count;
+extern int ltext_vert_fallback_size_mismatch_max_px;
 
 void ltext_reset_vert_ruby_adv_diff();
 void ltext_get_vert_ruby_adv_diff(int *total_out, int *max_out);
@@ -72,5 +75,8 @@ void ltext_get_vert_exact_hanging_glyph(
     int *font_entry_count_out, int *outside_regular_count_out,
     int *active_clip_count_out, int *regular_bottom_out,
     int *active_bottom_out, int *glyph_top_out, int *glyph_bottom_out);
+void ltext_reset_vert_fallback_size();
+void ltext_get_vert_fallback_size(
+    int *sample_count_out, int *mismatch_count_out, int *mismatch_max_px_out);
 
 #endif // LVTEXTFM_VERT_DIAG_H_INCLUDED

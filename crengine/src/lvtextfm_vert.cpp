@@ -31,6 +31,14 @@ bool verticalTextDebugEnabled()
     return getenv("KO_DEBUG_VERT_BG") != NULL;
 }
 
+static bool verticalSpacingDebugEnabled()
+{
+    static int enabled = -1;
+    if ( enabled < 0 )
+        enabled = getenv("CRE_LOG_VERT_SPACING") ? 1 : 0;
+    return enabled != 0;
+}
+
 bool isVerticalTextLineDebugClass(const lString32 &cls)
 {
     return cls == "calibre10" || cls == "calibre11"
@@ -242,6 +250,24 @@ int ltext_vert_exact_hanging_last_regular_bottom = -1;
 int ltext_vert_exact_hanging_last_active_bottom = -1;
 int ltext_vert_exact_hanging_last_glyph_top = -1;
 int ltext_vert_exact_hanging_last_glyph_bottom = -1;
+int ltext_vert_fallback_size_sample_count = 0;
+int ltext_vert_fallback_size_mismatch_count = 0;
+int ltext_vert_fallback_size_mismatch_max_px = 0;
+
+void ltext_reset_vert_fallback_size() {
+    ltext_vert_fallback_size_sample_count = 0;
+    ltext_vert_fallback_size_mismatch_count = 0;
+    ltext_vert_fallback_size_mismatch_max_px = 0;
+}
+
+void ltext_get_vert_fallback_size(
+    int *sample_count_out, int *mismatch_count_out, int *mismatch_max_px_out)
+{
+    *sample_count_out = ltext_vert_fallback_size_sample_count;
+    *mismatch_count_out = ltext_vert_fallback_size_mismatch_count;
+    *mismatch_max_px_out = ltext_vert_fallback_size_mismatch_max_px;
+}
+
 void ltext_reset_vert_exact_hanging_clip() {
     ltext_vert_exact_hanging_attempt_count = 0;
     ltext_vert_hanging_layout_count = 0;
@@ -2755,13 +2781,25 @@ void applyVerticalWordDraw(
     // column position.
     //
     // Keep the previous visual end as a lower bound to avoid overlap.
-    int clamped_x = vertClampForward((int)word->x, state.vert_min_next_x);
+    int prev_end = state.vert_min_next_x;
+    int clamped_x = vertClampForward((int)word->x, prev_end);
     y0_out = y + frmline->x + clamped_x;
     // Advance vert_min_next_x.  Skip the font_size clamp for half-em JFM
     // chars: Phase 3 intentionally sets word->width = em/2 for class
     // [1][2][3][4][7], and clamping would re-introduce a half-em gap.
     int effective_width = getVerticalEffectiveTextWidth((int)word->width,
             font->getSize(), true, curr_cjk_class);
+    if ( verticalSpacingDebugEnabled() && srcline->t.text && word->t.len > 0 ) {
+        fprintf(stderr,
+            "VERT_SPACING U+%04X raw_x=%d prev_end=%d clamped=%d "
+            "effective=%d gap_layout=%d gap_draw=%d y0=%d word_width=%d "
+            "prev_class=%d curr_class=%d\n",
+            (unsigned int)srcline->t.text[word->t.start],
+            (int)word->x, prev_end, clamped_x, effective_width,
+            (int)word->x - prev_end, clamped_x - prev_end, y0_out,
+            (int)word->width, state.vert_prev_cjk_class,
+            (int)curr_cjk_class);
+    }
     state.vert_min_next_x = clamped_x + effective_width;
     // CJK word processed: reset "prev was non-CJK" flag and remember this
     // CJK char's JFM class for the next char's inter-class glue lookup.
