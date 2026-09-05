@@ -19,6 +19,7 @@
 
 #include "../include/lvfntman.h"
 #include "../include/lvfntman_vert.h"  // fork-only: TTB glyph metrics cache
+#include "../include/lvtextfm_vert_diag.h"
 #include "../include/lvstream.h"
 #include "../include/lvdrawbuf.h"
 #include "../include/lvstyles.h"
@@ -1657,7 +1658,14 @@ public:
     }
 
     /// get fallback font for this font (when it is used as the main font)
-    LVFontRef getFallbackFont() {
+    LVFontRef getFallbackFont(bool preserve_size=false) {
+        // x-height matching is useful when mixing Latin fonts horizontally,
+        // but a vertical CJK run is laid out in nominal em-sized capsules.
+        // Returning a visually shrunk fallback there makes the ink smaller
+        // while the slot advance stays unchanged, exaggerating and varying
+        // the visible gaps between consecutive Japanese glyphs.
+        if ( preserve_size )
+            return fontMan->GetFallbackFont(_size, getWeight(), _italic!=0);
         if ( _fallbackFontIsSet )
             return _fallbackFont;
         _fallbackFont = fontMan->GetFallbackFont(_size, getWeight(), _italic!=0);
@@ -1676,7 +1684,10 @@ public:
     }
 
     /// get next fallback font for this font (when it is already used as a fallback font)
-    LVFontRef getNextFallbackFont() {
+    LVFontRef getNextFallbackFont(bool preserve_size=false) {
+        if ( preserve_size )
+            return fontMan->GetFallbackFont(
+                _size, getWeight(), _italic!=0, _faceName);
         if ( _nextFallbackFontIsSet )
             return _nextFallbackFont;
         _nextFallbackFont = fontMan->GetFallbackFont(_size, getWeight(), _italic!=0, _faceName);
@@ -3016,8 +3027,11 @@ public:
             // todo: (if needed) might need a pre-pass in the fallback case:
             // full shaping without filterChar(), and if any .notdef
             // codepoint, re-shape with filterChar()...
+            bool is_vertical_subst = (hints & LFNT_HINT_IS_VERTICAL) != 0;
             bool is_fallback_font = hints & LFNT_HINT_IS_FALLBACK_FONT;
-            LVFontRef fallback = is_fallback_font ? getNextFallbackFont() : getFallbackFont();
+            LVFontRef fallback = is_fallback_font
+                ? getNextFallbackFont(is_vertical_subst)
+                : getFallbackFont(is_vertical_subst);
             bool has_fallback_font = !fallback.isNull();
             // Fork-only (Phase 5a of m-tky/koreader-tategumi#15): in vertical
             // writing modes, substitute selected codepoints to their CJK
@@ -3030,7 +3044,6 @@ public:
             // (see getVertPresentationForm).  Font-conditional: only substitute
             // when the font cmap actually contains the FE-form glyph (LuaTeX-ja
             // line 996: `if t.characters[v]`).
-            bool is_vertical_subst = (hints & LFNT_HINT_IS_VERTICAL) != 0;
             auto subst_for_vert = [&](lChar32 ch) -> lChar32 {
                 if (!is_vertical_subst) return ch;
                 lChar32 v = getVertPresentationForm(ch);
@@ -4434,6 +4447,8 @@ public:
 
         bool transform_stretch = flags & LFNT_HINT_TRANSFORM_STRETCH;
         int text_height = transform_stretch ? target_h : _height;
+        if (flags & LFNT_HINT_EXACT_HANGING_DIAG)
+            ltext_vert_exact_hanging_font_entry_count++;
         if ( y + text_height < clip.top || y >= clip.bottom )
             return 0;
 
@@ -4458,8 +4473,11 @@ public:
             hb_glyph_position_t *glyph_pos = 0;
             hb_buffer_clear_contents(_hb_buffer);
             // Fill HarfBuzz buffer
+            bool is_vertical_draw = (flags & LFNT_HINT_IS_VERTICAL) != 0;
             bool is_fallback_font = flags & LFNT_HINT_IS_FALLBACK_FONT;
-            LVFontRef fallback = is_fallback_font ? getNextFallbackFont() : getFallbackFont();
+            LVFontRef fallback = is_fallback_font
+                ? getNextFallbackFont(is_vertical_draw)
+                : getFallbackFont(is_vertical_draw);
             bool has_fallback_font = !fallback.isNull();
             // Fork-only Phase 5a: vform substitution before HB shaping (see
             // measureText for full doc).  text[] (caller's buffer) stays
@@ -4533,7 +4551,6 @@ public:
             // We (re)build _hb_features here rather than at construction time because
             // measureText() may have changed it since the last DrawTextString call —
             // but only when the vertical state actually differs (this is a hot path).
-            bool is_vertical_draw = (flags & LFNT_HINT_IS_VERTICAL) != 0;
             bool is_vert_mark     = (flags & LFNT_HINT_VERTICAL_MARK) != 0;
             // render+rotate mode: draw horizontally into temp buffer, then rotate 90° CW
             bool is_render_rotate = (flags & LFNT_HINT_RENDER_ROTATE_FOR_VERTICAL) != 0;
@@ -4715,6 +4732,17 @@ public:
                     int fb_y = is_vertical_draw
                         ? y
                         : y + _baseline - fallback->getBaseline();
+                    if ( is_vertical_draw ) {
+                        ltext_vert_fallback_size_sample_count++;
+                        int size_diff = fallback->getSize() - _size;
+                        if ( size_diff < 0 )
+                            size_diff = -size_diff;
+                        if ( size_diff > 0 ) {
+                            ltext_vert_fallback_size_mismatch_count++;
+                            if ( size_diff > ltext_vert_fallback_size_mismatch_max_px )
+                                ltext_vert_fallback_size_mismatch_max_px = size_diff;
+                        }
+                    }
                     bool fb_addHyphen = false; // will be added by main font
                     const lChar32 * fb_text = text + fb_t_start;
                     int fb_len = fb_t_end - fb_t_start;
@@ -4988,13 +5016,16 @@ public:
                                                     "VERT_CAPSULE U+%04X gid=%u "
                                                     "axis_x_rel_26_6=%lld "
                                                     "baseline_y_rel_26_6=%lld "
-                                                    "vby=%d gx=%d gy=%d\n",
+                                                    "vby=%d em=%d slot_y=%d gx=%d "
+                                                    "glyph_y=%d..%d bmp_h=%d\n",
                                                     (unsigned int)cluster_char,
                                                     (unsigned int)glyph_info[i].codepoint,
                                                     (long long)axis_x_rel_26_6,
                                                     (long long)baseline_y_rel_26_6,
                                                     vertical_origin_y,
-                                                    gx, gy);
+                                                    _size, y, gx, gy,
+                                                    gy + (int)item->bmp_height,
+                                                    (int)item->bmp_height);
                                             }
                                         } else {
                                             // Same virtual-body model with already rounded
@@ -5084,6 +5115,23 @@ public:
                                             }
                                         }
                                     } else {
+                                        if (flags & LFNT_HINT_EXACT_HANGING_DIAG) {
+                                            ltext_vert_exact_hanging_draw_count++;
+                                            ltext_vert_exact_hanging_last_regular_bottom =
+                                                ltext_vert_exact_hanging_regular_bottom;
+                                            ltext_vert_exact_hanging_last_active_bottom = clip.bottom;
+                                            ltext_vert_exact_hanging_last_glyph_top = gy;
+                                            ltext_vert_exact_hanging_last_glyph_bottom =
+                                                gy + (int)item->bmp_height;
+                                            if (ltext_vert_exact_hanging_regular_bottom >= 0
+                                                    && gy + (int)item->bmp_height
+                                                        > ltext_vert_exact_hanging_regular_bottom)
+                                                ltext_vert_exact_hanging_outside_regular_count++;
+                                            if (gx >= clip.left && gy >= clip.top
+                                                    && gx + (int)item->bmp_width <= clip.right
+                                                    && gy + (int)item->bmp_height <= clip.bottom)
+                                                ltext_vert_exact_hanging_active_clip_count++;
+                                        }
                                         drawGlyphItem(buf, gx, gy, item, palette);
                                     }
                                 }

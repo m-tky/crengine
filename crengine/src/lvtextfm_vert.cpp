@@ -31,6 +31,14 @@ bool verticalTextDebugEnabled()
     return getenv("KO_DEBUG_VERT_BG") != NULL;
 }
 
+static bool verticalSpacingDebugEnabled()
+{
+    static int enabled = -1;
+    if ( enabled < 0 )
+        enabled = getenv("CRE_LOG_VERT_SPACING") ? 1 : 0;
+    return enabled != 0;
+}
+
 bool isVerticalTextLineDebugClass(const lString32 &cls)
 {
     return cls == "calibre10" || cls == "calibre11"
@@ -227,24 +235,78 @@ int ltext_vert_single_image_clip_overflow_count = 0;
 int ltext_vert_single_image_clip_overflow_max_px = 0;
 int ltext_vert_single_image_center_error_max_px = 0;
 // Exact-boundary hanging punctuation diagnostics. An attempt is a supported
-// punctuation word whose y0 equals the regular clip bottom; recovery means the
-// per-word overflow clip made it drawable; reject means it was still outside.
+// punctuation word whose slot crosses the regular clip bottom; recovery means
+// the per-word overflow clip made it drawable; reject means it was still outside.
 int ltext_vert_exact_hanging_attempt_count = 0;
+int ltext_vert_hanging_layout_count = 0;
 int ltext_vert_exact_hanging_clip_recovery_count = 0;
 int ltext_vert_exact_hanging_clip_reject_count = 0;
+int ltext_vert_exact_hanging_draw_count = 0;
+int ltext_vert_exact_hanging_font_entry_count = 0;
+int ltext_vert_exact_hanging_outside_regular_count = 0;
+int ltext_vert_exact_hanging_active_clip_count = 0;
+int ltext_vert_exact_hanging_regular_bottom = -1;
+int ltext_vert_exact_hanging_last_regular_bottom = -1;
+int ltext_vert_exact_hanging_last_active_bottom = -1;
+int ltext_vert_exact_hanging_last_glyph_top = -1;
+int ltext_vert_exact_hanging_last_glyph_bottom = -1;
+int ltext_vert_fallback_size_sample_count = 0;
+int ltext_vert_fallback_size_mismatch_count = 0;
+int ltext_vert_fallback_size_mismatch_max_px = 0;
+
+void ltext_reset_vert_fallback_size() {
+    ltext_vert_fallback_size_sample_count = 0;
+    ltext_vert_fallback_size_mismatch_count = 0;
+    ltext_vert_fallback_size_mismatch_max_px = 0;
+}
+
+void ltext_get_vert_fallback_size(
+    int *sample_count_out, int *mismatch_count_out, int *mismatch_max_px_out)
+{
+    *sample_count_out = ltext_vert_fallback_size_sample_count;
+    *mismatch_count_out = ltext_vert_fallback_size_mismatch_count;
+    *mismatch_max_px_out = ltext_vert_fallback_size_mismatch_max_px;
+}
 
 void ltext_reset_vert_exact_hanging_clip() {
     ltext_vert_exact_hanging_attempt_count = 0;
+    ltext_vert_hanging_layout_count = 0;
     ltext_vert_exact_hanging_clip_recovery_count = 0;
     ltext_vert_exact_hanging_clip_reject_count = 0;
+    ltext_vert_exact_hanging_draw_count = 0;
+    ltext_vert_exact_hanging_font_entry_count = 0;
+    ltext_vert_exact_hanging_outside_regular_count = 0;
+    ltext_vert_exact_hanging_active_clip_count = 0;
+    ltext_vert_exact_hanging_regular_bottom = -1;
+    ltext_vert_exact_hanging_last_regular_bottom = -1;
+    ltext_vert_exact_hanging_last_active_bottom = -1;
+    ltext_vert_exact_hanging_last_glyph_top = -1;
+    ltext_vert_exact_hanging_last_glyph_bottom = -1;
 }
 
 void ltext_get_vert_exact_hanging_clip(
-    int *attempt_count_out, int *recovery_count_out, int *reject_count_out)
+    int *attempt_count_out, int *recovery_count_out, int *reject_count_out,
+    int *draw_count_out, int *layout_count_out)
 {
     *attempt_count_out = ltext_vert_exact_hanging_attempt_count;
     *recovery_count_out = ltext_vert_exact_hanging_clip_recovery_count;
     *reject_count_out = ltext_vert_exact_hanging_clip_reject_count;
+    *draw_count_out = ltext_vert_exact_hanging_draw_count;
+    *layout_count_out = ltext_vert_hanging_layout_count;
+}
+
+void ltext_get_vert_exact_hanging_glyph(
+    int *font_entry_count_out, int *outside_regular_count_out,
+    int *active_clip_count_out, int *regular_bottom_out,
+    int *active_bottom_out, int *glyph_top_out, int *glyph_bottom_out)
+{
+    *font_entry_count_out = ltext_vert_exact_hanging_font_entry_count;
+    *outside_regular_count_out = ltext_vert_exact_hanging_outside_regular_count;
+    *active_clip_count_out = ltext_vert_exact_hanging_active_clip_count;
+    *regular_bottom_out = ltext_vert_exact_hanging_last_regular_bottom;
+    *active_bottom_out = ltext_vert_exact_hanging_last_active_bottom;
+    *glyph_top_out = ltext_vert_exact_hanging_last_glyph_top;
+    *glyph_bottom_out = ltext_vert_exact_hanging_last_glyph_bottom;
 }
 
 void ltext_reset_vert_image_draw_drift() {
@@ -902,6 +964,12 @@ void alignLineHorizontalVerticalPostPass( LVFormatter* fmt, formatted_line_t * f
                         vert_y_adjust = (col_w + em) / 2 - box_h;  // centred
                     else
                         vert_y_adjust = col_w - box_h; // fallback
+                } else if ( node->getChildCount() == 1
+                        && node->getChildNode(0)->isEffectiveImage() ) {
+                    // Keep a large inline-block image on the current column;
+                    // the generic negative overhang below moves it off-page.
+                    if ( col_w > box_h )
+                        vert_y_adjust = (col_w - box_h) / 2;
                 } else if ( col_w > box_h ) {
                     vert_y_adjust = (col_w - box_h) / 2;  // centre small box
                 } else if ( box_h > col_w ) {
@@ -1147,6 +1215,8 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
         // We keep as 'para' the first source text, as it carries
         // the text alignment to use with all added lines.
         src_text_fragment_t * para = &fmt->m_pbuffer->srctext[start];
+        const int alignment = para->flags & LTEXT_FLAG_NEWLINE;
+        const bool can_shrink_for_justification = alignment == LTEXT_ALIGN_WIDTH;
 
         // detect case with inline preformatted text inside block with line feeds
         bool preFormattedOnly = true;
@@ -1333,7 +1403,12 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
                 // old two-part test (m_advance for the real advance + an "every char = one
                 // em" safety estimate); that estimate over-counted narrow Latin and half-em
                 // punctuation, breaking mixed CJK/Latin columns early (issue #17).
-                int fitSpaceReduceWidth = y <= 0 ? fit.space_reduce_width : 0;
+                // Phase-5 JFM/xkanjiskip shrink is applied only by justified
+                // alignment.  Letting left/center/right aligned columns borrow
+                // that capacity makes wrapping retain characters whose actual
+                // draw slots are beyond clip.bottom (issue #74).
+                int fitSpaceReduceWidth = can_shrink_for_justification && y <= 0
+                        ? fit.space_reduce_width : 0;
                 if ( y + fit.used > maxHeight + fitSpaceReduceWidth ) {
                     // burasagari / end-of-line punctuation hanging: if the overflowing character is
                     // a sentence-end punctuation that must not start a new column (line-start kinsoku),
@@ -1344,6 +1419,7 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
                     if ( fmt->m_hanging_punctuation && isVerticalHangingChar(fmt->m_text[i]) ) {
                         int prev_adv = fit.used - eff_adv;
                         if ( y + prev_adv <= maxHeight + fitSpaceReduceWidth ) {
+                            ltext_vert_hanging_layout_count++;
                             lastNormalWrap = i;  // include this char in current column
                             i++;
                             break;
@@ -1499,7 +1575,9 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
 
             // Hyphenation
             tryHyphenBreak(fmt, pos, wordpos, lastNormalWrap, lastMandatoryWrap,
-                           y, w0, maxHeight, y <= 0 ? fit.space_reduce_width : 0,
+                           y, w0, maxHeight,
+                           can_shrink_for_justification && y <= 0
+                               ? fit.space_reduce_width : 0,
                            unusedPercent, lastHyphWrap);
 
             // Decide best position to end this line
@@ -2712,13 +2790,25 @@ void applyVerticalWordDraw(
     // column position.
     //
     // Keep the previous visual end as a lower bound to avoid overlap.
-    int clamped_x = vertClampForward((int)word->x, state.vert_min_next_x);
+    int prev_end = state.vert_min_next_x;
+    int clamped_x = vertClampForward((int)word->x, prev_end);
     y0_out = y + frmline->x + clamped_x;
     // Advance vert_min_next_x.  Skip the font_size clamp for half-em JFM
     // chars: Phase 3 intentionally sets word->width = em/2 for class
     // [1][2][3][4][7], and clamping would re-introduce a half-em gap.
     int effective_width = getVerticalEffectiveTextWidth((int)word->width,
             font->getSize(), true, curr_cjk_class);
+    if ( verticalSpacingDebugEnabled() && srcline->t.text && word->t.len > 0 ) {
+        fprintf(stderr,
+            "VERT_SPACING U+%04X raw_x=%d prev_end=%d clamped=%d "
+            "effective=%d gap_layout=%d gap_draw=%d y0=%d word_width=%d "
+            "prev_class=%d curr_class=%d\n",
+            (unsigned int)srcline->t.text[word->t.start],
+            (int)word->x, prev_end, clamped_x, effective_width,
+            (int)word->x - prev_end, clamped_x - prev_end, y0_out,
+            (int)word->width, state.vert_prev_cjk_class,
+            (int)curr_cjk_class);
+    }
     state.vert_min_next_x = clamped_x + effective_width;
     // CJK word processed: reset "prev was non-CJK" flag and remember this
     // CJK char's JFM class for the next char's inter-class glue lookup.
@@ -2740,15 +2830,19 @@ void applyVerticalWordDraw(
     }
     state.vert_prev_plain_y0 = y0_out;
     state.vert_prev_effective_width = effective_width;
-    // A hanging punctuation slot may start exactly at the regular content
-    // clip bottom: its ink belongs in the bottom margin. LFormattedText::Draw
+    // A hanging punctuation slot may cross the regular content clip bottom:
+    // its ink belongs in the bottom margin. LFormattedText::Draw
     // has already widened the active DrawBuf clip to content_overflow_clip for
     // a fully contained vertical column, so let DrawTextString use that clip.
     // Keep the regular early-out for every other character.
     bool is_hanging_punctuation = srcline->t.text && word->t.len == 1
             && isVerticalHangingChar(srcline->t.text[word->t.start]);
+    // JFM compression and inter-class glue can place the punctuation origin a
+    // few pixels before the regular bottom while its allocated slot still
+    // crosses that boundary. Treat that as hanging too: checking y0 alone
+    // misses the common long-paragraph case and leaves its lower ink clipped.
     word_is_exact_hanging_out = is_hanging_punctuation
-            && y0_out == clip.bottom;
+            && y0_out + effective_width > clip.bottom;
     if ( word_is_exact_hanging_out )
         ltext_vert_exact_hanging_attempt_count++;
     if ( y0_out >= clip.bottom
