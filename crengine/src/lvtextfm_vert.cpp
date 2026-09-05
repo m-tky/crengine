@@ -1215,6 +1215,8 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
         // We keep as 'para' the first source text, as it carries
         // the text alignment to use with all added lines.
         src_text_fragment_t * para = &fmt->m_pbuffer->srctext[start];
+        const int alignment = para->flags & LTEXT_FLAG_NEWLINE;
+        const bool can_shrink_for_justification = alignment == LTEXT_ALIGN_WIDTH;
 
         // detect case with inline preformatted text inside block with line feeds
         bool preFormattedOnly = true;
@@ -1401,7 +1403,12 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
                 // old two-part test (m_advance for the real advance + an "every char = one
                 // em" safety estimate); that estimate over-counted narrow Latin and half-em
                 // punctuation, breaking mixed CJK/Latin columns early (issue #17).
-                int fitSpaceReduceWidth = y <= 0 ? fit.space_reduce_width : 0;
+                // Phase-5 JFM/xkanjiskip shrink is applied only by justified
+                // alignment.  Letting left/center/right aligned columns borrow
+                // that capacity makes wrapping retain characters whose actual
+                // draw slots are beyond clip.bottom (issue #74).
+                int fitSpaceReduceWidth = can_shrink_for_justification && y <= 0
+                        ? fit.space_reduce_width : 0;
                 if ( y + fit.used > maxHeight + fitSpaceReduceWidth ) {
                     // burasagari / end-of-line punctuation hanging: if the overflowing character is
                     // a sentence-end punctuation that must not start a new column (line-start kinsoku),
@@ -1568,7 +1575,9 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
 
             // Hyphenation
             tryHyphenBreak(fmt, pos, wordpos, lastNormalWrap, lastMandatoryWrap,
-                           y, w0, maxHeight, y <= 0 ? fit.space_reduce_width : 0,
+                           y, w0, maxHeight,
+                           can_shrink_for_justification && y <= 0
+                               ? fit.space_reduce_width : 0,
                            unusedPercent, lastHyphWrap);
 
             // Decide best position to end this line
