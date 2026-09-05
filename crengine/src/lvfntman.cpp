@@ -19,6 +19,7 @@
 
 #include "../include/lvfntman.h"
 #include "../include/lvfntman_vert.h"  // fork-only: TTB glyph metrics cache
+#include "../include/lvtextfm_vert_diag.h"
 #include "../include/lvstream.h"
 #include "../include/lvdrawbuf.h"
 #include "../include/lvstyles.h"
@@ -4434,6 +4435,8 @@ public:
 
         bool transform_stretch = flags & LFNT_HINT_TRANSFORM_STRETCH;
         int text_height = transform_stretch ? target_h : _height;
+        if (flags & LFNT_HINT_EXACT_HANGING_DIAG)
+            ltext_vert_exact_hanging_font_entry_count++;
         if ( y + text_height < clip.top || y >= clip.bottom )
             return 0;
 
@@ -5084,6 +5087,23 @@ public:
                                             }
                                         }
                                     } else {
+                                        if (flags & LFNT_HINT_EXACT_HANGING_DIAG) {
+                                            ltext_vert_exact_hanging_draw_count++;
+                                            ltext_vert_exact_hanging_last_regular_bottom =
+                                                ltext_vert_exact_hanging_regular_bottom;
+                                            ltext_vert_exact_hanging_last_active_bottom = clip.bottom;
+                                            ltext_vert_exact_hanging_last_glyph_top = gy;
+                                            ltext_vert_exact_hanging_last_glyph_bottom =
+                                                gy + (int)item->bmp_height;
+                                            if (ltext_vert_exact_hanging_regular_bottom >= 0
+                                                    && gy + (int)item->bmp_height
+                                                        > ltext_vert_exact_hanging_regular_bottom)
+                                                ltext_vert_exact_hanging_outside_regular_count++;
+                                            if (gx >= clip.left && gy >= clip.top
+                                                    && gx + (int)item->bmp_width <= clip.right
+                                                    && gy + (int)item->bmp_height <= clip.bottom)
+                                                ltext_vert_exact_hanging_active_clip_count++;
+                                        }
                                         drawGlyphItem(buf, gx, gy, item, palette);
                                     }
                                 }

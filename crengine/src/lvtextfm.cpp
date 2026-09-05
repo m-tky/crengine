@@ -7379,18 +7379,25 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         drawFlags |= LFNT_HINT_VERTICAL_DECORATION_EDGE;
                     }
                     {
-                        // A vertical hanging punctuation may deliberately start at
+                        // A vertical hanging punctuation may deliberately cross
                         // the regular content clip bottom. Most fully contained
                         // columns already draw with content_overflow_clip, but a
                         // partially clipped column keeps the regular clip and
-                        // LVFont::DrawTextString() would reject y0 == clip.bottom.
+                        // LVFont::DrawTextString() may clip its outboard ink.
                         // Widen only the bottom edge for this one word: preserving
                         // left/right prevents it from leaking onto an adjacent page.
                         lvRect word_orig_clip;
                         bool restore_word_clip = false;
                         if ( word_is_exact_hanging && !vert_skip_draw ) {
+                            drawFlags |= LFNT_HINT_EXACT_HANGING_DIAG;
                             buf->GetClipRect(&word_orig_clip);
-                            if ( y0 >= word_orig_clip.bottom && draw_extra_info
+                            // `clip` is the regular content clip used by vertical
+                            // placement. The DrawBuf may already use the wider
+                            // line-level overflow clip, so word_orig_clip.bottom
+                            // cannot reliably identify the boundary being hung.
+                            ltext_vert_exact_hanging_regular_bottom = clip.bottom;
+                            if ( y0 + (int)word->width > word_orig_clip.bottom
+                                    && draw_extra_info
                                     && draw_extra_info->content_overflow_clip.bottom
                                         > y0 ) {
                                 lvRect word_clip = word_orig_clip;
@@ -7422,6 +7429,8 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             w, h) : 0;
                         if ( restore_word_clip )
                             buf->SetClipRect(&word_orig_clip);
+                        if ( word_is_exact_hanging )
+                            ltext_vert_exact_hanging_regular_bottom = -1;
                         // Fork: extracted post-draw state update for Latin-in-vertical.
                         if (word_is_latin_in_vertical) {
                             applyVerticalLatinPostDraw(_adv, (int)word->width, vstate, clip, y);

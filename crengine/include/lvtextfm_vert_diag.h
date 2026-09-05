@@ -29,8 +29,18 @@ extern int ltext_vert_single_image_clip_overflow_count;
 extern int ltext_vert_single_image_clip_overflow_max_px;
 extern int ltext_vert_single_image_center_error_max_px;
 extern int ltext_vert_exact_hanging_attempt_count;
+extern int ltext_vert_hanging_layout_count;
 extern int ltext_vert_exact_hanging_clip_recovery_count;
 extern int ltext_vert_exact_hanging_clip_reject_count;
+extern int ltext_vert_exact_hanging_draw_count;
+extern int ltext_vert_exact_hanging_font_entry_count;
+extern int ltext_vert_exact_hanging_outside_regular_count;
+extern int ltext_vert_exact_hanging_active_clip_count;
+extern int ltext_vert_exact_hanging_regular_bottom;
+extern int ltext_vert_exact_hanging_last_regular_bottom;
+extern int ltext_vert_exact_hanging_last_active_bottom;
+extern int ltext_vert_exact_hanging_last_glyph_top;
+extern int ltext_vert_exact_hanging_last_glyph_bottom;
 
 void ltext_reset_vert_ruby_adv_diff();
 void ltext_get_vert_ruby_adv_diff(int *total_out, int *max_out);
@@ -56,6 +66,11 @@ void ltext_get_vert_single_image_placement(
     int *clip_overflow_max_px_out, int *center_error_max_px_out);
 void ltext_reset_vert_exact_hanging_clip();
 void ltext_get_vert_exact_hanging_clip(
-    int *attempt_count_out, int *recovery_count_out, int *reject_count_out);
+    int *attempt_count_out, int *recovery_count_out, int *reject_count_out,
+    int *draw_count_out, int *layout_count_out);
+void ltext_get_vert_exact_hanging_glyph(
+    int *font_entry_count_out, int *outside_regular_count_out,
+    int *active_clip_count_out, int *regular_bottom_out,
+    int *active_bottom_out, int *glyph_top_out, int *glyph_bottom_out);
 
 #endif // LVTEXTFM_VERT_DIAG_H_INCLUDED

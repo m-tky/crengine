@@ -227,24 +227,60 @@ int ltext_vert_single_image_clip_overflow_count = 0;
 int ltext_vert_single_image_clip_overflow_max_px = 0;
 int ltext_vert_single_image_center_error_max_px = 0;
 // Exact-boundary hanging punctuation diagnostics. An attempt is a supported
-// punctuation word whose y0 equals the regular clip bottom; recovery means the
-// per-word overflow clip made it drawable; reject means it was still outside.
+// punctuation word whose slot crosses the regular clip bottom; recovery means
+// the per-word overflow clip made it drawable; reject means it was still outside.
 int ltext_vert_exact_hanging_attempt_count = 0;
+int ltext_vert_hanging_layout_count = 0;
 int ltext_vert_exact_hanging_clip_recovery_count = 0;
 int ltext_vert_exact_hanging_clip_reject_count = 0;
-
+int ltext_vert_exact_hanging_draw_count = 0;
+int ltext_vert_exact_hanging_font_entry_count = 0;
+int ltext_vert_exact_hanging_outside_regular_count = 0;
+int ltext_vert_exact_hanging_active_clip_count = 0;
+int ltext_vert_exact_hanging_regular_bottom = -1;
+int ltext_vert_exact_hanging_last_regular_bottom = -1;
+int ltext_vert_exact_hanging_last_active_bottom = -1;
+int ltext_vert_exact_hanging_last_glyph_top = -1;
+int ltext_vert_exact_hanging_last_glyph_bottom = -1;
 void ltext_reset_vert_exact_hanging_clip() {
     ltext_vert_exact_hanging_attempt_count = 0;
+    ltext_vert_hanging_layout_count = 0;
     ltext_vert_exact_hanging_clip_recovery_count = 0;
     ltext_vert_exact_hanging_clip_reject_count = 0;
+    ltext_vert_exact_hanging_draw_count = 0;
+    ltext_vert_exact_hanging_font_entry_count = 0;
+    ltext_vert_exact_hanging_outside_regular_count = 0;
+    ltext_vert_exact_hanging_active_clip_count = 0;
+    ltext_vert_exact_hanging_regular_bottom = -1;
+    ltext_vert_exact_hanging_last_regular_bottom = -1;
+    ltext_vert_exact_hanging_last_active_bottom = -1;
+    ltext_vert_exact_hanging_last_glyph_top = -1;
+    ltext_vert_exact_hanging_last_glyph_bottom = -1;
 }
 
 void ltext_get_vert_exact_hanging_clip(
-    int *attempt_count_out, int *recovery_count_out, int *reject_count_out)
+    int *attempt_count_out, int *recovery_count_out, int *reject_count_out,
+    int *draw_count_out, int *layout_count_out)
 {
     *attempt_count_out = ltext_vert_exact_hanging_attempt_count;
     *recovery_count_out = ltext_vert_exact_hanging_clip_recovery_count;
     *reject_count_out = ltext_vert_exact_hanging_clip_reject_count;
+    *draw_count_out = ltext_vert_exact_hanging_draw_count;
+    *layout_count_out = ltext_vert_hanging_layout_count;
+}
+
+void ltext_get_vert_exact_hanging_glyph(
+    int *font_entry_count_out, int *outside_regular_count_out,
+    int *active_clip_count_out, int *regular_bottom_out,
+    int *active_bottom_out, int *glyph_top_out, int *glyph_bottom_out)
+{
+    *font_entry_count_out = ltext_vert_exact_hanging_font_entry_count;
+    *outside_regular_count_out = ltext_vert_exact_hanging_outside_regular_count;
+    *active_clip_count_out = ltext_vert_exact_hanging_active_clip_count;
+    *regular_bottom_out = ltext_vert_exact_hanging_last_regular_bottom;
+    *active_bottom_out = ltext_vert_exact_hanging_last_active_bottom;
+    *glyph_top_out = ltext_vert_exact_hanging_last_glyph_top;
+    *glyph_bottom_out = ltext_vert_exact_hanging_last_glyph_bottom;
 }
 
 void ltext_reset_vert_image_draw_drift() {
@@ -1350,6 +1386,7 @@ void processParagraphVertical( LVFormatter* fmt, int start, int end, bool isLast
                     if ( fmt->m_hanging_punctuation && isVerticalHangingChar(fmt->m_text[i]) ) {
                         int prev_adv = fit.used - eff_adv;
                         if ( y + prev_adv <= maxHeight + fitSpaceReduceWidth ) {
+                            ltext_vert_hanging_layout_count++;
                             lastNormalWrap = i;  // include this char in current column
                             i++;
                             break;
@@ -2746,15 +2783,19 @@ void applyVerticalWordDraw(
     }
     state.vert_prev_plain_y0 = y0_out;
     state.vert_prev_effective_width = effective_width;
-    // A hanging punctuation slot may start exactly at the regular content
-    // clip bottom: its ink belongs in the bottom margin. LFormattedText::Draw
+    // A hanging punctuation slot may cross the regular content clip bottom:
+    // its ink belongs in the bottom margin. LFormattedText::Draw
     // has already widened the active DrawBuf clip to content_overflow_clip for
     // a fully contained vertical column, so let DrawTextString use that clip.
     // Keep the regular early-out for every other character.
     bool is_hanging_punctuation = srcline->t.text && word->t.len == 1
             && isVerticalHangingChar(srcline->t.text[word->t.start]);
+    // JFM compression and inter-class glue can place the punctuation origin a
+    // few pixels before the regular bottom while its allocated slot still
+    // crosses that boundary. Treat that as hanging too: checking y0 alone
+    // misses the common long-paragraph case and leaves its lower ink clipped.
     word_is_exact_hanging_out = is_hanging_punctuation
-            && y0_out == clip.bottom;
+            && y0_out + effective_width > clip.bottom;
     if ( word_is_exact_hanging_out )
         ltext_vert_exact_hanging_attempt_count++;
     if ( y0_out >= clip.bottom
