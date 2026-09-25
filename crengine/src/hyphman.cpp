@@ -1506,28 +1506,30 @@ bool UserHyphDict::hyphenate( const lChar32 * str, int len, const lUInt16 * widt
     char mask[WORD_LENGTH+4] = { 0 };
 
     // Make word from str, with soft-hyphens stripped out.
-    int wlen;
-    int w = 0;
+    int wlen = 0;
     for ( int i=0; i<len; i++ ) {
         if ( str[i] != UNICODE_SOFT_HYPHEN_CODE ) {
-            word[w++] = str[i];
+            word[wlen++] = str[i];
         }
     }
-    wlen = w-1;
-    if ( wlen<3 ) // don't hyphenate words with three letters
+    if ( wlen<=3 ) // don't hyphenate words with three letters
         return false;
     lStr_lowercase(word, wlen);
     // printf("word:%s => #%s# (%d => %d)\n", LCSTR(lString32(str, len)), LCSTR(lString32(word)), len, wlen);
-    memset( mask, '0', wlen+3 );
+    memset( mask, '0', wlen+2 );
 
     if ( !UserHyphDict::getMask(word, mask) ) {
         return false;
     }
 
-    for ( int i = 0 ; i<len ; ++i ) {
+    for ( int i = 0, soft_hyphen_offset = 0; i<len ; ++i ) {
+        if ( str[i] == UNICODE_SOFT_HYPHEN_CODE ) {
+             soft_hyphen_offset++;
+             continue;
+        }
         if ( widths[i] + hyphCharWidth > maxWidth )
             break;
-        if ( mask[i] == '1' ) {
+        if ( mask[i-soft_hyphen_offset] == '1' ) {
             if ( flagSize == 2 ) {
                 lUInt16* flags16 = (lUInt16*) flags;
                 flags16[i] |= LCHAR_ALLOW_HYPH_WRAP_AFTER;
