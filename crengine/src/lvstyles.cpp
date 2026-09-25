@@ -425,6 +425,10 @@ bool css_style_rec_t::serialize( SerialBuf & buf )
     ST_PUT_ENUM(float_);
     ST_PUT_ENUM(clear);
     ST_PUT_ENUM(direction);
+    ST_PUT_ENUM(writing_mode);
+    ST_PUT_ENUM(text_orientation);
+    ST_PUT_ENUM(text_combine_upright);
+    ST_PUT_ENUM(text_emphasis_style);
     ST_PUT_ENUM(visibility);
     ST_PUT_ENUM(line_break);
     ST_PUT_ENUM(word_break);
@@ -503,6 +507,10 @@ bool css_style_rec_t::deserialize( SerialBuf & buf )
     ST_GET_ENUM(css_float_t, float_);
     ST_GET_ENUM(css_clear_t, clear);
     ST_GET_ENUM(css_direction_t, direction);
+    ST_GET_ENUM(css_writing_mode_t, writing_mode);
+    ST_GET_ENUM(css_text_orientation_t, text_orientation);
+    ST_GET_ENUM(css_text_combine_upright_t, text_combine_upright);
+    ST_GET_ENUM(css_text_emphasis_style_t, text_emphasis_style);
     ST_GET_ENUM(css_visibility_t, visibility);
     ST_GET_ENUM(css_line_break_t, line_break);
     ST_GET_ENUM(css_word_break_t, word_break);
