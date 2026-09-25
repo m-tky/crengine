@@ -18,6 +18,7 @@
 //   per glyph index per face), so the FT_Load_Glyph cost is paid once.
 // =============================================================================
 
+#include "../include/lvtextfm_vert_diag.h"
 #include "../include/lvfntman_vert.h"
 #include "../include/lvfntman.h"
 #include "../include/lvdrawbuf.h"
@@ -57,6 +58,9 @@ bool drawVerticalTextDecorations(
         // The caller resolves this start coordinate from the decoration owner
         // (including overlap with a coincident inline-end border).
         buf->FillRect(inline_end, y0, inline_end + thickness, y1, color);
+        if ( !IS_COLOR_FULLY_TRANSPARENT(color) )
+            ltext_record_vert_decoration_trace(1, inline_end, y0,
+                    inline_end + thickness, y1);
     }
     if ( flags & LFNT_DRAW_OVERLINE ) {
         int inline_start = (flags & LFNT_HINT_VERTICAL_DECORATION_EDGE)
@@ -65,6 +69,9 @@ bool drawVerticalTextDecorations(
         // Resolve it from the decoration owner just like the right-side
         // underline, so nested font-size changes cannot kink the rule.
         buf->FillRect(inline_start, y0, inline_start + thickness, y1, color);
+        if ( !IS_COLOR_FULLY_TRANSPARENT(color) )
+            ltext_record_vert_decoration_trace(2, inline_start, y0,
+                    inline_start + thickness, y1);
     }
     if ( flags & LFNT_DRAW_LINE_THROUGH ) {
         int line_x = x + (cross_extent - thickness) / 2;

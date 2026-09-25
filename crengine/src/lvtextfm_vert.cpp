@@ -2174,6 +2174,16 @@ static void drawBorderVertical(LVDrawBuf * buf, int line_x, int col_width,
         return;
     }
     drawBorder(buf, x0, x1, y_start, y_end - y_start, borderNode, bdidx);
+    if ( bdidx == 1 && bw > 0 && y_end > y_start ) {
+        css_style_ref_t style = borderNode->getStyle();
+        css_length_t border_color = style->border_color[bdidx];
+        lUInt32 color = border_color.type == css_val_color
+                ? border_color.value : style->color.value;
+        color = buf->getInvertColors() ? invertNonGrayscaleColor(color) : color;
+        if ( !IS_COLOR_FULLY_TRANSPARENT(color) )
+            ltext_record_vert_border_trace(borderNode->getDataIndex(),
+                    x0, y_start, x1, y_end);
+    }
 }
 
 // CSS text decorations are established by an inline box and propagated

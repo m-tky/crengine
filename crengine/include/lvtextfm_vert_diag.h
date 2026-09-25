@@ -45,6 +45,17 @@ extern int ltext_vert_fallback_size_sample_count;
 extern int ltext_vert_fallback_size_mismatch_count;
 extern int ltext_vert_fallback_size_mismatch_max_px;
 
+// Opt-in, bounded draw trace: 1=underline, 2=overline, 3=right border.
+// Rectangles are screen coordinates [x0,x1) x [y0,y1); owner is a DOM data index.
+void ltext_reset_vert_decoration_trace();
+void ltext_stop_vert_decoration_trace();
+void ltext_get_vert_decoration_trace_stats(int *count_out, int *overflow_out);
+bool ltext_get_vert_decoration_trace_event(int index, int *kind_out,
+        int *owner_out, int *char_out, int *x0_out, int *y0_out,
+        int *x1_out, int *y1_out);
+void ltext_set_vert_decoration_trace_context(int owner_id, int first_codepoint);
+void ltext_record_vert_decoration_trace(int kind, int x0, int y0, int x1, int y1);
+void ltext_record_vert_border_trace(int owner_id, int x0, int y0, int x1, int y1);
 void ltext_reset_vert_ruby_adv_diff();
 void ltext_get_vert_ruby_adv_diff(int *total_out, int *max_out);
 void ltext_reset_vert_bleed();

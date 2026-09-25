@@ -47,6 +47,68 @@
 #define UNUSED_SPACE_THRESHOLD_PERCENT 5
 #define MAX_ADDED_LETTER_SPACING_PERCENT 0
 #define CJK_WIDTH_SCALE_PERCENT 100
+struct VertDecorationTraceEvent {
+    int kind, owner, character, x0, y0, x1, y1;
+};
+static VertDecorationTraceEvent vert_decoration_trace[128];
+static int vert_decoration_trace_count = 0;
+static int vert_decoration_trace_overflow = 0;
+static bool vert_decoration_trace_enabled = false;
+static int vert_decoration_trace_owner = 0;
+static int vert_decoration_trace_character = 0;
+
+void ltext_reset_vert_decoration_trace() {
+    vert_decoration_trace_count = 0;
+    vert_decoration_trace_overflow = 0;
+    vert_decoration_trace_owner = 0;
+    vert_decoration_trace_character = 0;
+    vert_decoration_trace_enabled = true;
+}
+void ltext_stop_vert_decoration_trace() {
+    vert_decoration_trace_enabled = false;
+    vert_decoration_trace_owner = 0;
+    vert_decoration_trace_character = 0;
+}
+void ltext_get_vert_decoration_trace_stats(int *count_out, int *overflow_out) {
+    *count_out = vert_decoration_trace_count;
+    *overflow_out = vert_decoration_trace_overflow;
+}
+bool ltext_get_vert_decoration_trace_event(int index, int *kind_out,
+        int *owner_out, int *char_out, int *x0_out, int *y0_out,
+        int *x1_out, int *y1_out) {
+    if ( index < 0 || index >= vert_decoration_trace_count )
+        return false;
+    const VertDecorationTraceEvent &event = vert_decoration_trace[index];
+    *kind_out = event.kind; *owner_out = event.owner;
+    *char_out = event.character; *x0_out = event.x0; *y0_out = event.y0;
+    *x1_out = event.x1; *y1_out = event.y1;
+    return true;
+}
+void ltext_set_vert_decoration_trace_context(int owner_id, int first_codepoint) {
+    if ( !vert_decoration_trace_enabled )
+        return;
+    vert_decoration_trace_owner = owner_id;
+    vert_decoration_trace_character = first_codepoint;
+}
+static void recordVertDecorationTrace(int kind, int owner, int character,
+        int x0, int y0, int x1, int y1) {
+    if ( !vert_decoration_trace_enabled )
+        return;
+    if ( vert_decoration_trace_count >= 128 ) {
+        vert_decoration_trace_overflow++;
+        return;
+    }
+    VertDecorationTraceEvent &event = vert_decoration_trace[vert_decoration_trace_count++];
+    event.kind = kind; event.owner = owner; event.character = character;
+    event.x0 = x0; event.y0 = y0; event.x1 = x1; event.y1 = y1;
+}
+void ltext_record_vert_decoration_trace(int kind, int x0, int y0, int x1, int y1) {
+    recordVertDecorationTrace(kind, vert_decoration_trace_owner,
+            vert_decoration_trace_character, x0, y0, x1, y1);
+}
+void ltext_record_vert_border_trace(int owner_id, int x0, int y0, int x1, int y1) {
+    recordVertDecorationTrace(3, owner_id, 0, x0, y0, x1, y1);
+}
 
 // to debug formatter
 
@@ -6715,7 +6777,10 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             lastWordEnd = x+frmline->x+word->x+word->width;
                         }
                     }
-                    if ( word->o.baseline ) { // We have some left/right border to draw, that we'll do below
+                    // Vertical side borders do not contribute to the PAD's
+                    // inline-axis baseline, but still need the border draw pass.
+                    if ( word->o.baseline || (is_vertical
+                            && (measureBorder(node, 1) > 0 || measureBorder(node, 3) > 0)) ) {
                         has_inline_borders = true;
                     }
                 }
@@ -7412,6 +7477,10 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             if ( y0 >= active_clip.bottom )
                                 ltext_vert_exact_hanging_clip_reject_count++;
                         }
+                        if ( is_vertical && !vert_skip_draw
+                                && vertical_decoration_owner )
+                            ltext_set_vert_decoration_trace_context(
+                                    vertical_decoration_owner->getDataIndex(), str[0]);
                         int _adv = !vert_skip_draw ? font->DrawTextString(
                             buf,
                             x0,
@@ -7427,6 +7496,8 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             word->width,
                             text_decoration_back_gap,
                             w, h) : 0;
+                        if ( is_vertical )
+                            ltext_set_vert_decoration_trace_context(0, 0);
                         if ( restore_word_clip )
                             buf->SetClipRect(&word_orig_clip);
                         if ( word_is_exact_hanging )
