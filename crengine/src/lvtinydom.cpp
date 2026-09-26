@@ -138,7 +138,16 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 //         extents for orthogonal spacers and images in mixed-content lines.
 //         These alter word positions, line dimensions and parent auto sizing;
 //         old cached formatted geometry must be discarded.
-#define FORMATTING_VERSION_ID 0x0050
+// 0x0052: non-HarfBuzz vertical measure/draw apply the JFM Phase-3 slot
+//         override and pick the font's +vert/+vrt2 GSUB glyph, so half-em
+//         classes keep the em grid in every kerning mode; old cached
+//         formatted geometry must be discarded.
+// 0x0053: vertical line-start opening brackets take a full em with a half-em
+//         lead-in, text-indent snaps to whole ems, and default justification
+//         no longer smears non-final columns; the HarfBuzz path also measures
+//         vertical advances with the draw pen's synth weight.  These alter
+//         word positions, so old cached formatted geometry must be discarded.
+#define FORMATTING_VERSION_ID 0x0053
 
 #ifndef DOC_DATA_COMPRESSION_LEVEL
 /// data compression level (0=no compression, 1=fast compressions, 3=normal compression)
