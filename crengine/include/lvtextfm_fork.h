@@ -175,6 +175,10 @@ void applyVerticalImageDraw(
     int y, int line_x, int column_clip_right, const lvRect & clip,
     VerticalDrawState & state,
     int & x0_out, int & y0_out);
+// Center image-only vertical EPUB fragments across their physical page.
+bool centerVerticalImageOnlyFragment(
+    ldomNode * node, formatted_line_t * frmline,
+    draw_extra_info_t * draw_extra_info, int image_width, int & x_inout);
 
 // Vertical-mode inline-box (ruby) draw positioning (defined in lvtextfm_vert.cpp).
 // Sets x0, y0, doc_x_ib, doc_y_ib for the inner DrawDocument call, applies

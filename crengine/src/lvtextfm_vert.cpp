@@ -2516,6 +2516,51 @@ void applyVerticalImageDraw(
     state.vert_prev_was_non_cjk_word = true;
     state.vert_prev_cjk_class = -1;
 }
+bool centerVerticalImageOnlyFragment(
+    ldomNode * node, formatted_line_t * frmline,
+    draw_extra_info_t * draw_extra_info, int image_width, int & x_inout)
+{
+    if ( !node || !node->isImage() || !frmline || frmline->word_count != 1
+            || !draw_extra_info || !draw_extra_info->is_page_mode )
+        return false;
+    lvRect page = draw_extra_info->content_overflow_clip;
+    int page_width = page.right - page.left;
+    if ( page_width <= 0 || image_width > page_width )
+        return false;
+    ldomNode * image = node;
+    ldomNode * parent = image->getParentNode();
+    while ( parent && parent->getNodeId() != el_body ) {
+        bool found_image = false;
+        for ( int i = 0; i < parent->getChildCount(); i++ ) {
+            ldomNode * child = parent->getChildNode(i);
+            if ( child->isWhitespaceText() )
+                continue;
+            if ( child != image || found_image )
+                return false;
+            found_image = true;
+        }
+        if ( !found_image )
+            return false;
+        image = parent;
+        parent = parent->getParentNode();
+    }
+    if ( !parent || !parent->getParentNode()
+            || parent->getParentNode()->getNodeId() != el_DocFragment )
+        return false;
+    bool found_image = false;
+    for ( int i = 0; i < parent->getChildCount(); i++ ) {
+        ldomNode * child = parent->getChildNode(i);
+        if ( child->isWhitespaceText() )
+            continue;
+        if ( child != image || found_image )
+            return false;
+        found_image = true;
+    }
+    if ( !found_image )
+        return false;
+    x_inout = page.left + (page_width - image_width) / 2;
+    return true;
+}
 
 // =============================================================================
 // applyVerticalInlineBoxDraw

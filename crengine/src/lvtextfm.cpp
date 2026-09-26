@@ -7137,6 +7137,9 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             }
                             applyVerticalImageDraw(frmline, &image_word, image_y, line_x,
                                 column_clip_right, clip, vstate, x0, y0);
+                            centerVerticalImageOnlyFragment(
+                                node, frmline, draw_extra_info,
+                                (int)image_word.width, x0);
                             if ( ruby_base_em_center_shift )
                                 x0 = line_x - (int)frmline->height;
                             if ( verticalTextDebugEnabled() ) {
