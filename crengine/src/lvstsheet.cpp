@@ -5481,8 +5481,7 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                 // draw anchor are hard-coded rl.  Alias at parse time so the value is
                 // honest about what gets rendered, rather than silently producing
                 // rl geometry under an lr label.
-                if ( n == css_wm_vertical_lr )
-                    n = css_wm_vertical_rl;
+                n = css_wm_normalize(n);
                 break;
             case cssd_text_orientation:
                 IF_g_SET_n_AND_break(true, css_to_inherit, css_to_mixed);

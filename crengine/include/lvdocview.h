@@ -618,17 +618,16 @@ public:
     void setPageMargins( const lvRect & rc );
     /// returns page margins
     lvRect getPageMargins() const { return m_pageMargins; }
-    /// returns true if the document uses vertical-rl or vertical-lr writing mode
-    /// Phase 1: document-level flag only; mixed horizontal/vertical elements not yet supported.
-    /// TODO (Phase 2): per-element writing mode for mixed-mode documents.
-    bool isVerticalText() const;
-    /// In vertical-rl mode, returns the screen-X anchor for columns on a given page:
-    ///   page_right = pageRect.right - margin.right - centering_offset
-    /// where centering_offset = max(0, (page_width - page.height) / 2) distributes
-    /// the unused fraction of _page_width equally on both sides.
-    /// drawPageTo, docToWindowPoint, and windowToDocPoint all call this so the
-    /// formula lives in exactly one place.
-    int vertPageRight( const lvRect & pageRect, int page_content_height ) const;
+    /// Document-wide content query, for navigation policy rather than geometry.
+    bool hasVerticalContent() const;
+    bool isVerticalText() const { return hasVerticalContent(); } // compatibility
+    /// Effective writing mode of an internal page index (-1 = current page).
+    int getPageWritingMode(int pageIndex=-1);
+    bool isVerticalPage(int pageIndex=-1) { return css_wm_is_vertical(getPageWritingMode(pageIndex)); }
+    /// Geometry query for a document-space block-axis position.
+    bool isVerticalPosition(int doc_y);
+    /// Shared right-edge anchor for vertical-rl drawing and coordinate conversion.
+    int vertPageRight( const lvRect & pageRect ) const;
     /// Vertical-rl coordinate conversion for SCROLL view mode.
     /// In SCROLL mode for vertical-rl, _pos is the doc-y anchor at the viewport's
     /// right edge (the entry point for forward reading); doc-y advances correspond

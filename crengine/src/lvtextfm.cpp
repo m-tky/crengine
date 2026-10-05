@@ -7336,7 +7336,6 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                     int x0, y0, w, h;
                     bool vert_skip_draw = false;
                     bool word_is_latin_in_vertical = false;
-                    bool word_is_vert_mark = false;
                     bool word_is_exact_hanging = false;
                     if ( srcline->flags & LTEXT_MATH_TRANSFORM ) {
                         ldomNode * node = (ldomNode *) srcline->object;
@@ -7351,14 +7350,16 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                     }
                     else {
                         if ( is_vertical ) {
-                            // Fork: extracted to lvtextfm_vert.cpp.  Sets x0/y0/
-                            // vert_skip_draw + drawFlags vertical bits + word_is_*
-                            // flags, and updates vstate (vert_min_next_x etc.).
-                            applyVerticalWordDraw(m_pbuffer, frmline, srcline, word, font,
-                                y, line_x, clip, vertical_line_has_image, drawFlags, vstate,
-                                x0, y0, vert_skip_draw,
-                                word_is_latin_in_vertical, word_is_vert_mark,
-                                word_is_exact_hanging);
+                            // Fork: placement and orientation are resolved together;
+                            // the helper also advances the per-column draw state.
+                            VerticalWordPlacement placement = applyVerticalWordDraw(
+                                m_pbuffer, frmline, srcline, word, font,
+                                y, line_x, clip, vertical_line_has_image, drawFlags, vstate);
+                            x0 = placement.x;
+                            y0 = placement.y;
+                            vert_skip_draw = placement.skip_draw;
+                            word_is_latin_in_vertical = placement.rotated;
+                            word_is_exact_hanging = placement.exact_hanging;
                             if (getenv("CRE_LOG_VERT_MARKS") && !vert_skip_draw) {
                                 fprintf(stderr,
                                     "VERT_GLYPH text=U+%04X line=(x:%d y:%d w:%d h:%d) "

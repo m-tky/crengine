@@ -344,14 +344,19 @@ enum css_writing_mode_t {
     css_wm_inherit,
     css_wm_horizontal_tb,
     css_wm_vertical_rl,
-    css_wm_vertical_lr
+    css_wm_vertical_lr // accepted as a compatibility alias for vertical-rl
 };
-/// Returns true for any vertical writing mode (vertical-rl or vertical-lr).
-/// Use instead of repeating (wm == css_wm_vertical_rl || wm == css_wm_vertical_lr).
+/// The fork supports Japanese vertical-rl only. Normalize the legacy lr value
+/// at entry points too, so cached/programmatic styles follow the CSS parser.
+template<typename T>
+inline T css_wm_normalize(T wm) {
+    return wm == (T)css_wm_vertical_lr ? (T)css_wm_vertical_rl : wm;
+}
+/// Returns true for the supported vertical layout (including the lr alias).
 /// Accepts both css_writing_mode_t and int (some structs store it as int).
 template<typename T>
 inline bool css_wm_is_vertical(T wm) {
-    return wm == (T)css_wm_vertical_rl || wm == (T)css_wm_vertical_lr;
+    return css_wm_normalize(wm) == (T)css_wm_vertical_rl;
 }
 
 /// text-orientation property values

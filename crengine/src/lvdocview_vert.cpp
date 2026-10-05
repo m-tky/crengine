@@ -25,12 +25,11 @@
 /// the right.  All three callers (drawPageTo, docToWindowPoint,
 /// windowToDocPoint) use this function so the anchor stays consistent between
 /// rendering and coordinate conversion.
-int LVDocView::vertPageRight( const lvRect & pageRect, int page_content_height ) const {
-    (void)page_content_height; // no centering: always anchor at the right edge
+int LVDocView::vertPageRight( const lvRect & pageRect ) const {
     return pageRect.right - m_pageMargins.right;
 }
 
-/// Returns true if the document is laid out vertically (vertical-rl/-lr).
+/// Returns true if any rendered page uses vertical layout (vertical-lr aliases rl).
 ///
 /// Primary signal: the per-page writing mode recorded during rendering.  Each
 /// page carries the css writing-mode of its content (stamped from its first
@@ -45,7 +44,7 @@ int LVDocView::vertPageRight( const lvRect & pageRect, int page_content_height )
 /// false-positived on horizontal rtl-spine EPUBs with no writing-mode CSS
 /// (e.g. calibre conversions): a short title page made isVerticalText() true,
 /// and ReaderRolling forced RTL page-turn on horizontal text (horizontal-RTL).
-bool LVDocView::isVerticalText() const {
+bool LVDocView::hasVerticalContent() const {
     if (m_pages.length() > 0) {
         for (int i = 0; i < m_pages.length(); i++) {
             if (css_wm_is_vertical(m_pages[i]->writing_mode))
@@ -78,6 +77,25 @@ bool LVDocView::isVerticalText() const {
         }
     }
     return false;
+}
+
+int LVDocView::getPageWritingMode(int pageIndex) {
+    if ( pageIndex < 0 )
+        pageIndex = getCurPage(true);
+    if ( pageIndex >= 0 && pageIndex < m_pages.length() ) {
+        const LVRendPageInfo * page = m_pages[pageIndex];
+        if ( page->flags == RN_PAGE_TYPE_COVER )
+            return css_wm_horizontal_tb;
+        int mode = css_wm_normalize((int)page->writing_mode);
+        if ( mode != css_wm_inherit )
+            return mode;
+    }
+    // No resolved page mode: use the CSS default, not another page's mode.
+    return css_wm_horizontal_tb;
+}
+
+bool LVDocView::isVerticalPosition(int doc_y) {
+    return isVerticalPage(m_pages.FindNearestPage(doc_y, 0));
 }
 
 /// Vertical-rl doc → window for SCROLL view mode.

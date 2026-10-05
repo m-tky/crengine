@@ -8,7 +8,6 @@
 // to upstream.  It must be included after lvtinydom.h / fb2def.h /
 // cssdef.h are visible (i.e. include it from lvtextfm.cpp only).
 //
-// Created during Phase C Step 1 (soft-fork hygiene) — see CLAUDE.md.
 // =============================================================================
 
 #ifndef LVTEXTFM_FORK_H_INCLUDED
@@ -49,18 +48,16 @@ struct VerticalDrawState {
     int vert_min_next_x;             // minimum next-allowed word->x position
     int vert_prev_plain_y0;          // y0 of last drawn plain/CJK char (-1 = none yet)
     int vert_prev_effective_width;   // effective_width of that char (= slot height)
-    bool vert_prev_was_non_cjk_word; // for CJK↔non-CJK xkanjiskip
     int vert_prev_cjk_class;         // JLReqVertClass of prev CJK word (-1 = none)
 
     VerticalDrawState()
         : vert_min_next_x(0), vert_prev_plain_y0(-1),
-          vert_prev_effective_width(0), vert_prev_was_non_cjk_word(false),
+          vert_prev_effective_width(0),
           vert_prev_cjk_class(-1) {}
     void resetForNewFrmline() {
         vert_min_next_x = 0;
         vert_prev_plain_y0 = -1;
         vert_prev_effective_width = 0;
-        vert_prev_was_non_cjk_word = false;
         vert_prev_cjk_class = -1;
     }
 };
@@ -197,23 +194,21 @@ void applyVerticalInlineBoxDraw(
 // Latin-rotated-as-block, and plain CJK.  Caller must have checked
 // is_vertical && !(srcline->flags & LTEXT_MATH_TRANSFORM).
 //
-// Out:
-//   x0_out, y0_out      — final pen position for DrawTextString
-//   vert_skip_draw_out  — true if the word starts past clip.bottom
-//   word_is_latin_in_vertical_out, word_is_vert_mark_out — needed by caller
-//     to drive post-DrawTextString state updates and ruby mark drawing.
-//   word_is_exact_hanging_out — true only for supported hanging punctuation
-//     whose draw origin is exactly clip.bottom.
-void applyVerticalWordDraw(
+struct VerticalWordPlacement {
+    int x = 0;
+    int y = 0;
+    bool skip_draw = false;
+    bool rotated = false;
+    bool exact_hanging = false;
+};
+
+VerticalWordPlacement applyVerticalWordDraw(
     formatted_text_fragment_t * pbuffer,
     formatted_line_t * frmline, src_text_fragment_t * srcline,
     formatted_word_t * word, LVFont * font,
     int y, int line_x, const lvRect & clip, bool line_has_image,
     lUInt32 & drawFlags,
-    VerticalDrawState & state,
-    int & x0_out, int & y0_out, bool & vert_skip_draw_out,
-    bool & word_is_latin_in_vertical_out, bool & word_is_vert_mark_out,
-    bool & word_is_exact_hanging_out);
+    VerticalDrawState & state);
 
 // Vertical + inline-box post-pass (defined in lvtextfm_vert.cpp).
 // Handles inline-box absolute positioning, vertical-mode column clamping,

@@ -33,10 +33,11 @@
 struct CSSLogical {
     css_writing_mode_t wm;
 
-    explicit CSSLogical(css_writing_mode_t w) : wm(w) {}
+    // vertical-lr is a compatibility alias, not a second layout direction.
+    explicit CSSLogical(css_writing_mode_t w) : wm(css_wm_normalize(w)) {}
 
     bool isVertical() const {
-        return wm == css_wm_vertical_rl || wm == css_wm_vertical_lr;
+        return css_wm_is_vertical(wm);
     }
 
     // ── padding / margin array indices ──────────────────────────────────

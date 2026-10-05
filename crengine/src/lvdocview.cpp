@@ -2005,14 +2005,7 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 	int start = page.start;
 	int height = page.height;
 	int headerHeight = getPageHeaderHeight();
-	bool is_vert = isVerticalText();  // cache: called multiple times in this function
-	// FORK (mixed writing modes): in a document whose pages have differing
-	// writing modes (e.g. a horizontal author-bio/colophon/ad page inside a
-	// vertical book), this page's own mode is authoritative — draw it with the
-	// upstream horizontal pipeline or the fork's vertical one accordingly.
-	// Pure single-mode documents keep using the document-level isVerticalText().
-	if ( m_pages.hasMixedWritingModes() )
-		is_vert = css_wm_is_vertical(page.writing_mode);
+	bool is_vert = isVerticalPage(page.index);
 	//CRLog::trace("drawPageTo(%d,%d)", start, height);
 
 	// pageRect is actually the full draw buffer, except in 2-page mode where
@@ -2054,8 +2047,8 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 	// end of line with some fonts) to not be cut by this clipping.
 	if ( is_vert ) {
 		// In vertical-rl, clip.right is the column anchor: line_x = clip.right - doc_y.
-		// vertPageRight() centers the text block so left and right gaps are equal.
-		clip.right = vertPageRight( *pageRect, height );
+		// Partial pages keep their columns anchored at the right margin.
+		clip.right = vertPageRight( *pageRect );
 	} else {
 		clip.right = pageRect->left + pageRect->width();
 	}
@@ -2232,11 +2225,6 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 				// starts below the header, and y0 must be 0 so columns are not
 				// shifted left by clip.top pixels (which would hide the last
 				// clip.top-worth of columns on every page).
-				// FORK (mixed writing modes): use this page's own mode (matches the
-				// is_vert computed at the top of drawPageTo) so a horizontal page in
-				// a vertical book is drawn with the upstream horizontal origin.
-				bool is_vert = m_pages.hasMixedWritingModes()
-					? css_wm_is_vertical(page.writing_mode) : isVerticalText();
 				int draw_x0 = is_vert ? clip.top                        : pageRect->left + m_pageMargins.left;
 				int draw_y0 = is_vert ? 0                               : clip.top;
 				DrawDocument(*drawbuf, m_doc->getRootNode(),
@@ -2678,8 +2666,8 @@ void LVDocView::Draw(LVDrawBuf & drawbuf, int position, int page, bool rotate, b
 //Draw( m_drawbuf, m_pos, true );
 //}
 
-// vertPageRight and isVerticalText (fork-only) moved to lvdocview_vert.cpp,
-// which is #included at the end of this file.
+// Fork-only writing-mode queries and vertical coordinate helpers live in
+// the separate lvdocview_vert.cpp translation unit.
 
 /// converts point from window to document coordinates, returns true if success
 bool LVDocView::windowToDocPoint(lvPoint & pt, bool pullInPageArea) {
@@ -2689,7 +2677,7 @@ bool LVDocView::windowToDocPoint(lvPoint & pt, bool pullInPageArea) {
 #endif
 	if (getViewMode() == DVM_SCROLL) {
 		// FORK: vertical-rl uses Y=X-swapped axes in SCROLL mode too.
-		if ( isVerticalText() )
+		if ( isVerticalPage() )
 			return windowToDocPointScrollVert( pt, pullInPageArea );
 		// SCROLL mode
 		if ( pullInPageArea ) {
@@ -2753,16 +2741,14 @@ bool LVDocView::windowToDocPoint(lvPoint & pt, bool pullInPageArea) {
 			int page_y = m_pages[page]->start;
 			// FORK (mixed writing modes): use this page's own mode, so taps on a
 			// horizontal page inside a vertical book convert correctly.
-			bool pt_is_vert = m_pages.hasMixedWritingModes()
-				? css_wm_is_vertical(m_pages[page]->writing_mode) : isVerticalText();
+			bool pt_is_vert = isVerticalPage(page);
 			if (pt_is_vert) {
 				// Vertical-rl: screen ↔ doc coordinate swap.
 				// Use m_pageRects[page_rect_idx] directly so vertPageRight() receives
 				// the original (non-adjusted) rect — no margin reconstruction needed.
 				int screen_x = pt.x;
 				int screen_y = pt.y;
-				int page_right = vertPageRight( m_pageRects[page_rect_idx],
-				                                m_pages[page]->height );
+				int page_right = vertPageRight( m_pageRects[page_rect_idx] );
 				int draw_x0 = m_pageRects[page_rect_idx].top + m_pageMargins.top + headerHeight;
 				// adv = offset into this page's column progression (the vertical
 				// analogue of pt.y in the horizontal branch).  On a partial page
@@ -2807,7 +2793,7 @@ bool LVDocView::docToWindowPoint(lvPoint & pt, bool isRectBottom, bool fitToPage
 	// TODO: implement coordinate conversion here
 	if (getViewMode() == DVM_SCROLL) {
 		// FORK: vertical-rl uses Y=X-swapped axes in SCROLL mode too.
-		if ( isVerticalText() )
+		if ( isVerticalPosition(pt.y) )
 			return docToWindowPointScrollVert( pt );
 		// SCROLL mode
 		pt.y -= _pos;
@@ -2837,13 +2823,11 @@ bool LVDocView::docToWindowPoint(lvPoint & pt, bool isRectBottom, bool fitToPage
                 }
                 if (index >= 0) {
                     // FORK (mixed writing modes): dispatch on the target page's own mode.
-                    bool pt_is_vert = m_pages.hasMixedWritingModes()
-                        ? css_wm_is_vertical(m_pages[page + index]->writing_mode) : isVerticalText();
+                    bool pt_is_vert = isVerticalPage(page + index);
                     if (pt_is_vert) {
                         // Vertical-rl: reverse of windowToDocPoint vertical swap.
-                        // vertPageRight() mirrors drawPageTo's clip.right (margin + centering).
-                        int page_right = vertPageRight( m_pageRects[index],
-                                                        m_pages[page + index]->height );
+                        // Match the right-edge anchor used by drawPageTo.
+                        int page_right = vertPageRight( m_pageRects[index] );
                         int page_left   = m_pageRects[index].left   + m_pageMargins.left;
                         int page_top    = m_pageRects[index].top    + m_pageMargins.top;
                         int page_bottom = m_pageRects[index].bottom - m_pageMargins.bottom;
