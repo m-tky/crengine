@@ -589,7 +589,8 @@ static int distributeVerticalJustifyByPriority( formatted_line_t * frmline,
     if ( remaining <= 0 || gaps.empty() )
         return 0;
     int total_applied = 0;
-    for ( int priority=0; priority<=3 && remaining>0; priority++ ) {
+    // Priorities 0..2 contain bounded JFM punctuation glue.
+    for ( int priority=0; priority<=2 && remaining>0; priority++ ) {
         int total_capacity = 0;
         for ( size_t i=0; i<gaps.size(); i++ ) {
             int cap = stretch ? gaps[i].stretch_px : gaps[i].shrink_px;
@@ -611,8 +612,6 @@ static int distributeVerticalJustifyByPriority( formatted_line_t * frmline,
             carry = (cap * to_apply + carry) % total_capacity;
             if ( amount > cap )
                 amount = cap;
-            if ( amount <= 0 && distributed < to_apply )
-                amount = 1;
             if ( amount > to_apply - distributed )
                 amount = to_apply - distributed;
             if ( amount <= 0 )
@@ -623,42 +622,35 @@ static int distributeVerticalJustifyByPriority( formatted_line_t * frmline,
         remaining -= distributed;
         total_applied += distributed;
     }
+    // Only after punctuation reaches its limits, distribute the remainder
+    // over ordinary body boundaries. Priority 3 stores em weights, not caps.
+    // Carry fractional pixels across the whole column instead of forcing a
+    // minimum pixel or putting all rounding leftovers at the column head.
     if ( stretch && remaining > 0 ) {
-        int count = 0;
+        int total_weight = 0;
         for ( size_t i=0; i<gaps.size(); i++ ) {
-            int cap = stretch ? gaps[i].stretch_px : gaps[i].shrink_px;
-            if ( cap > 0 )
-                count++;
+            if ( gaps[i].stretch_priority == 3 )
+                total_weight += gaps[i].stretch_px;
         }
-        if ( count <= 0 )
-            count = (int)gaps.size();
-        int div = remaining / count;
-        int mod = remaining % count;
-        for ( size_t i=0; i<gaps.size() && remaining>0; i++ ) {
-            int cap = stretch ? gaps[i].stretch_px : gaps[i].shrink_px;
-            if ( cap <= 0 && count != (int)gaps.size() )
-                continue;
-            int amount = div;
-            if ( mod > 0 ) {
-                amount++;
-                mod--;
+        if ( total_weight > 0 ) {
+            int carry = 0;
+            for ( size_t i=0; i<gaps.size(); i++ ) {
+                if ( gaps[i].stretch_priority != 3 )
+                    continue;
+                int weighted = gaps[i].stretch_px * remaining + carry;
+                int amount = weighted / total_weight;
+                carry = weighted % total_weight;
+                shiftVerticalWordsFrom(frmline, gaps[i].word_index, amount);
+                total_applied += amount;
             }
-            if ( amount <= 0 )
-                amount = 1;
-            if ( amount > remaining )
-                amount = remaining;
-            shiftVerticalWordsFrom(frmline, gaps[i].word_index, stretch ? amount : -amount);
-            remaining -= amount;
-            total_applied += amount;
         }
     }
     return total_applied;
 }
 
 static void collectVerticalJustifyGaps( std::vector<VertJustifyGap> & gaps,
-        int word_index, formatted_word_t * prev_word,
-        const VertWordLayoutInfo & prev, const VertWordLayoutInfo & curr,
-        const JLReqVertGlueSpec & jfm_spec, bool cjk_non_cjk_boundary ) {
+        int word_index, const VertWordLayoutInfo & prev, const VertWordLayoutInfo & curr,
+        const JLReqVertGlueSpec & jfm_spec ) {
     if ( prev.preformatted || curr.preformatted )
         return;
     if ( prev.object || curr.object || prev.inline_box || curr.inline_box
@@ -671,32 +663,21 @@ static void collectVerticalJustifyGaps( std::vector<VertJustifyGap> & gaps,
     gap.stretch_priority = 1;
     gap.shrink_priority = 1;
 
-    if ( prev.ends_with_space && (prev_word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER) ) {
-        gap.stretch_px = prev.em / 2;
-        if ( gap.stretch_px < 1 )
-            gap.stretch_px = 1;
-        gap.shrink_px = (int)prev_word->width - (int)prev_word->min_width;
-        if ( gap.shrink_px < 0 )
-            gap.shrink_px = 0;
-        gap.stretch_priority = 0;
-        gap.shrink_priority = 0;
-    }
-    else if ( prev.cjk && curr.cjk ) {
+    // Preserve JFM punctuation limits and keep Western spacing fixed.
+    // Ordinary body boundaries are a last-resort expansion opportunity.
+    if ( prev.cjk && curr.cjk ) {
         gap.stretch_px = vertEighthsToPx(curr.em, jfm_spec.stretch_eighths);
         gap.shrink_px = vertEighthsToPx(curr.em, jfm_spec.shrink_eighths);
-        if ( jfm_spec.kanjiskip_stretch || (jfm_spec.base_eighths == 0
-                && jfm_spec.stretch_eighths == 0 && jfm_spec.shrink_eighths == 0
-                && !jfm_spec.is_kern) ) {
+        if ( jfm_spec.kanjiskip_stretch ) {
             gap.stretch_px += curr.em / 4; // kanjiskip = {0, .25, 0}
         }
         gap.stretch_priority = 1 + (int)jfm_spec.stretch_priority;
         gap.shrink_priority = 1 + (int)jfm_spec.shrink_priority;
-    }
-    else if ( cjk_non_cjk_boundary ) {
-        gap.stretch_px = vertEighthsToPx(curr.em, 2); // xkanjiskip stretch .25em
-        gap.shrink_px = vertEighthsToPx(curr.em, 1);  // xkanjiskip shrink .125em
-        gap.stretch_priority = 1;
-        gap.shrink_priority = 1;
+        if ( prev.jfm_class == JLREQ_VERT_CJK_BODY
+                && curr.jfm_class == JLREQ_VERT_CJK_BODY && !jfm_spec.is_kern ) {
+            gap.stretch_px = curr.em;
+            gap.stretch_priority = 3;
+        }
     }
 
     if ( gap.stretch_px > 0 || gap.shrink_px > 0 )
@@ -802,7 +783,6 @@ void alignLineHorizontalVerticalPostPass( LVFormatter* fmt, formatted_line_t * f
     int vert_layout_min_x = 0;  // mirrors vert_min_next_x in Draw()
     std::vector<VertJustifyGap> vert_justify_gaps;
     VertWordLayoutInfo prev_info;
-    formatted_word_t * prev_word = NULL;
     bool have_prev_info = false;
     for ( int i=0; i<frmline->word_count; i++ ) {
         formatted_word_t * wi = &frmline->words[i];
@@ -823,8 +803,8 @@ void alignLineHorizontalVerticalPostPass( LVFormatter* fmt, formatted_line_t * f
                 }
                 if ( base_glue > 0 )
                     vert_layout_min_x += base_glue;
-                collectVerticalJustifyGaps(vert_justify_gaps, i, prev_word,
-                        prev_info, curr_info, jfm_spec, boundary_cjk_non_cjk);
+                collectVerticalJustifyGaps(vert_justify_gaps, i,
+                        prev_info, curr_info, jfm_spec);
             }
             // Mirror Draw()'s vert_min_next_x clamping: if a previous word's
             // effective advance pushed vert_layout_min_x past this word's layout
@@ -838,11 +818,9 @@ void alignLineHorizontalVerticalPostPass( LVFormatter* fmt, formatted_line_t * f
                 vert_layout_min_x = next_x;
             if ( curr_info.object || curr_info.image || curr_info.pad ) {
                 have_prev_info = false;
-                prev_word = NULL;
             }
             else {
                 prev_info = curr_info;
-                prev_word = wi;
                 have_prev_info = true;
             }
             continue;
@@ -905,7 +883,6 @@ void alignLineHorizontalVerticalPostPass( LVFormatter* fmt, formatted_line_t * f
                     int nx = clamped_x + ib_layout_depth;
                     if ( nx > vert_layout_min_x ) vert_layout_min_x = nx;
                     have_prev_info = false;
-                    prev_word = NULL;
                 }
                 continue;
             }
@@ -922,7 +899,6 @@ void alignLineHorizontalVerticalPostPass( LVFormatter* fmt, formatted_line_t * f
                 node_fmt.setX( frmline->x + clamped_ib_x );
                 vert_layout_min_x = clamped_ib_x + ib_layout_depth;
                 have_prev_info = false;
-                prev_word = NULL;
             } else {
                 node_fmt.setX( frmline->x + word->x );
             }
