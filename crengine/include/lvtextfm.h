@@ -304,6 +304,7 @@ typedef struct
    lUInt32               height;        /**< height of text fragment */
    lUInt16               width;         /**< width of text fragment */
    lUInt16               page_height;   /**< max page height */
+   lInt32                percent_height_base; /**< -1 if percentage heights cannot resolve */
    LVHashTable<lUInt32, lString32Collection*> * inlineboxes_links;
 
    // text-indent is a paragraph property.  Keep its numeric value separate
@@ -439,6 +440,11 @@ public:
         m_pbuffer->text_indent = indent;
         m_pbuffer->text_indent_hanging = hanging;
         m_pbuffer->text_indent_set = true;
+    }
+
+    /// set the content-box height percentage-sized inline images resolve against.
+    void setPercentHeightBase(int height) {
+        m_pbuffer->percent_height_base = height;
     }
 
     /// set image scaling options

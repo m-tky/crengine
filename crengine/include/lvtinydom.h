@@ -182,10 +182,12 @@ extern const int gDOMVersionCurrent;
 ///   "co-operate", "co‐operate", "co−operate".
 /// - IGNORE_DIACRITICS ignores combining-mark distinctions after decomposition:
 ///   "замок", "за́мок", "замо́к" can match by base letters.
+/// - MATCH_WHOLE_WORDS keeps only matches delimited by word boundaries in the
+///   searchable text buffer.
 ///
-/// Regex search ignores all folding/normalization/format-control flags, but when
-/// MATCH_ACROSS_TEXT_NODES is set it can still search the raw text of a whole rendered
-/// block across inline node boundaries.
+/// Regex search ignores all folding/normalization/format-control/whole-word flags,
+/// but when MATCH_ACROSS_TEXT_NODES is set it can still search the raw text of a
+/// whole rendered block across inline node boundaries.
 ///
 /// In the current implementation, the order of processing is roughly:
 ///    1. optional decomposition/normalization (CANONICAL or COMPATIBILITY)
@@ -195,6 +197,7 @@ extern const int gDOMVersionCurrent;
 ///       and optional IGNORE_FORMAT_CONTROL_CHARS
 ///    4. optional IGNORE_DIACRITICS
 ///    5. optional COLLAPSE_CONSECUTIVE_SPACES
+///    6. optional MATCH_WHOLE_WORDS boundary check on the final searchable text
 ///
 enum ldomFindTextFlag : lUInt32 {
     LDOM_FIND_TEXT_NONE                        = 0x0000,
@@ -207,6 +210,7 @@ enum ldomFindTextFlag : lUInt32 {
     LDOM_FIND_TEXT_FOLD_APOSTROPHES            = 0x0040,
     LDOM_FIND_TEXT_FOLD_HYPHENS                = 0x0080,
     LDOM_FIND_TEXT_IGNORE_DIACRITICS           = 0x0100,
+    LDOM_FIND_TEXT_MATCH_WHOLE_WORDS           = 0x1000,
 };
 
 
@@ -852,6 +856,9 @@ public:
 
     int  getBaseline();
     void setBaseline( int baseline );
+    int  getPercentHeightBase();
+    void setPercentHeightBase( int height );
+
     int  getListPropNodeIndex();
     void setListPropNodeIndex( int idx );
     int  getLangNodeIndex();
@@ -1865,6 +1872,37 @@ public:
         lString8 extra;
         return getHtml(cssFiles, extra, wflags);
     }
+};
+
+/**
+ * @brief EPUB CFI (Canonical Fragment Identifier) for a location in a document.
+ *
+ * Built from the same (node, offset) couple as an ldomXPointer, it serializes
+ * that location as a string conforming to the EPUB Canonical Fragment Identifier
+ * specification (https://w3c.github.io/epub-specs/epub33/epubcfi/), pointing at
+ * the same location in the book as ldomXPointer::toStringV2() would.
+ */
+class ldomEPubCFI
+{
+protected:
+    ldomXPointer _pointer;
+public:
+    /// default constructor makes a NULL CFI
+    ldomEPubCFI() { }
+    /// constructor from an existing XPointer
+    ldomEPubCFI( const ldomXPointer & pointer ) : _pointer(pointer) { }
+    /// constructor by node pointer and offset
+    ldomEPubCFI( ldomNode * node, int offset ) : _pointer(node, offset) { }
+    /// returns the XPointer this CFI points to the same location as
+    const ldomXPointer & getXPointer() const { return _pointer; }
+    /// returns true for NULL CFI
+    bool isNull() const { return _pointer.isNull(); }
+    /// converts to an "epubcfi(...)" string (empty string if the location can't be expressed)
+    lString32 toString();
+    /// converts to an "epubcfi(parent,start,end)" range string spanning from this
+    /// location to the given one, in document order whichever way round they come
+    /// (empty string if the range can't be expressed)
+    lString32 toRangeString( const ldomXPointer & to );
 };
 
 #define MAX_DOM_LEVEL 64

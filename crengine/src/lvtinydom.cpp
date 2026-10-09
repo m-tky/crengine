@@ -104,7 +104,7 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 // vwm4: style-cache records now persist writing-mode-related properties.
 // Older records hash those properties but do not serialize them, making every
 // vertical document fail style restoration and trigger a full render.
-#define CACHE_FILE_FORMAT_VERSION "3.05.82k-vwm4"
+#define CACHE_FILE_FORMAT_VERSION "3.05.83k-vwm4"
 /// increment following value to force re-formatting of old book after load
 // 0x0036: vertical-rl page splitter uses a separate vert_split_page_h field
 //         (= page_width) for page-split boundaries while keeping page_h at
@@ -2234,6 +2234,33 @@ int RenderRectAccessor::getLangNodeIndex()
 #endif
     }
     return _lang_node_idx;
+}
+
+int RenderRectAccessor::getPercentHeightBase()
+{
+    if ( _dirty ) {
+        _dirty = false;
+        _node->getRenderData(*this);
+#ifdef DEBUG_RENDER_RECT_ACCESS
+        rr_lock( _node );
+#endif
+    }
+    return _percent_height_base;
+}
+
+void RenderRectAccessor::setPercentHeightBase( int height )
+{
+    if ( _dirty ) {
+        _dirty = false;
+        _node->getRenderData(*this);
+#ifdef DEBUG_RENDER_RECT_ACCESS
+        rr_lock( _node );
+#endif
+    }
+    if ( _percent_height_base != height ) {
+        _percent_height_base = height;
+        _modified = true;
+    }
 }
 void RenderRectAccessor::setLangNodeIndex( int idx )
 {
@@ -11888,6 +11915,275 @@ lString32 ldomXPointer::toStringV2AsIndexes()
     return path;
 }
 
+// EPUB CFI (Canonical Fragment Identifier)
+// https://w3c.github.io/epub-specs/epub33/epubcfi/
+//
+// A path of steps indexing an element's children: 2, 4, 6... for elements,
+// 1, 3, 5... for the text chunks between them (adjacent text nodes make a
+// single chunk; comments and PIs take no index). A location inside a chunk
+// is a ":charOffset" terminating step. Steps may carry a "[assertion]": we
+// only emit element ids.
+//
+// crengine merges all spine items into one DOM, each wrapped in a <DocFragment>
+// (standing for the <html> of a content document), and drops the package
+// document (OPF). We therefore assume the usual OPF layout to build the part
+// before the "!" indirection step: <spine> as 3rd element child of <package>
+// ("/6"), and the Nth <DocFragment> made from the Nth <itemref> ("/(2*(N+1))").
+
+// CFI offsets are offsets into DOM strings, which are UTF-16 encoded
+static int getCFITextLength( const lString32 & text )
+{
+    int length = 0;
+    for ( int i=0; i<text.length(); i++ )
+        length += text[i] > 0xFFFF ? 2 : 1; // non-BMP chars are a surrogate pair
+    return length;
+}
+
+// "^" escapes the characters that are special in a CFI
+static lString32 escapeCFIAssertion( const lString32 & value )
+{
+    lString32 escaped;
+    escaped.reserve(value.length());
+    for ( int i=0; i<value.length(); i++ ) {
+        lChar32 c = value[i];
+        if ( c=='^' || c=='[' || c==']' || c=='(' || c==')' || c==',' || c==';' || c=='=' )
+            escaped << '^';
+        escaped << c;
+    }
+    return escaped;
+}
+
+// Makes a "/index" step, with the element id as an assertion when it has one
+static lString32 getCFIElementStep( int index, ldomNode * node )
+{
+    lString32 step;
+    step << "/" << fmt::decimal(index);
+    if ( node->hasAttribute(attr_id) ) {
+        lString32 id = node->getAttributeValue(attr_id);
+        // ldomDocumentFragmentWriter prefixed it with "_doc_fragment_N_ " to keep
+        // ids unique across the merged sub-documents: recover the original.
+        if ( id.startsWith(U"_doc_fragment_") )
+            id = id.substr(id.pos(lString32(" ")) + 1);
+        if ( !id.empty() )
+            step << "[" << escapeCFIAssertion(id) << "]";
+    }
+    return step;
+}
+
+struct cfiChildScanState {
+    ldomNode * target;
+    int elementCount; // nb of element children before target
+    int textLength;   // length of the text chunk right before target
+    bool found;
+    cfiChildScanState( ldomNode * node ) : target(node), elementCount(0), textLength(0), found(false) { }
+};
+
+// Walks the children of parent (boxing elements being transparent, as they
+// don't exist in the source document) to index target as a CFI step.
+static void scanCFIChildren( ldomNode * parent, cfiChildScanState & scan )
+{
+    int count = parent->getChildCount();
+    for ( int i=0; i<count; i++ ) {
+        ldomNode * child = parent->getChildNode(i);
+        if ( child == scan.target ) {
+            scan.found = true;
+            return;
+        }
+        if ( child->isBoxingNode() ) { // autoBoxing, floatBox, inlineBox, tabularBox
+            scanCFIChildren(child, scan);
+            if ( scan.found )
+                return;
+        }
+        else if ( child->isBoxingNode(true) ) {
+            continue; // pseudoElem: generated content, not in the source document
+        }
+        else if ( child->isElement() ) {
+            scan.elementCount++;
+            scan.textLength = 0; // this element ends any preceding text chunk
+        }
+        else if ( child->isText() ) {
+            scan.textLength += getCFITextLength(child->getText());
+        }
+    }
+}
+
+// Builds the CFI steps for the pointed location, from the package document down
+// to the target. The indirection step ("!") is glued to the step it introduces,
+// as a path may neither start nor end on it.
+// Returns false if the location can't be expressed as a CFI.
+static bool getCFIPathSteps( const ldomXPointer & pointer, lString32Collection & steps )
+{
+    steps.clear();
+    if ( pointer.isNull() )
+        return false;
+    ldomNode * node = pointer.getNode();
+    int offset = pointer.getOffset();
+    ldomNode * p = node;
+    if ( node->isBoxingNode(true) ) { // (or pseudoElem)
+        // Get a node that exists in the source document (as toStringV2() does)
+        if ( offset >= 0 && offset < p->getChildCount() ) {
+            p = p->getChildNode(offset);
+            if ( p->isBoxingNode(true) ) {
+                p = p->getUnboxedFirstChild();
+                if ( !p )
+                    p = node->getUnboxedParent();
+            }
+        }
+        else {
+            p = node->getUnboxedParent();
+        }
+        offset = -1;
+    }
+    else if ( p->isElement() && offset >= 0 ) {
+        // An offset on an element indexes its children, which a CFI can't
+        // express: point at the start of that child instead.
+        ldomNode * child = offset < p->getChildCount() ? p->getChildNode(offset) : NULL;
+        while ( child && child->isBoxingNode(true) )
+            child = child->getUnboxedFirstChild();
+        if ( child ) {
+            p = child;
+            offset = p->isText() ? 0 : -1;
+        }
+        else { // no such child: point at the element
+            offset = -1;
+        }
+    }
+    if ( !p )
+        return false;
+
+    lString32Collection reversed; // steps are gathered from the target upwards
+    ldomNode * docFragment = NULL;
+    ldomNode * rootNode = node->getDocument()->getRootNode();
+    while ( p && p != rootNode ) {
+        if ( p->getNodeId() == el_DocFragment ) {
+            // The pointer targets a whole content document: point at its <body>
+            docFragment = p;
+            if ( reversed.length() == 0 ) {
+                ldomNode * body = NULL;
+                for ( int i=0; i<p->getChildCount() && !body; i++ ) {
+                    ldomNode * child = p->getChildNode(i);
+                    if ( child->isElement() && child->getNodeId() == el_body )
+                        body = child;
+                }
+                reversed.add( body ? getCFIElementStep(4, body) : cs32("/4") );
+            }
+            break;
+        }
+        ldomNode * parent = p->getParentNode();
+        while ( parent && isBoxingNode(parent) )
+            parent = parent->getParentNode();
+        if ( !parent )
+            break;
+        if ( parent->getNodeId() == el_DocFragment ) {
+            // Only <body> has a counterpart in the source document (the other
+            // possible child, <stylesheet>, is a crengine internal element).
+            if ( p->getNodeId() != el_body )
+                return false;
+            reversed.add( getCFIElementStep(4, p) );
+            docFragment = parent;
+            break;
+        }
+        if ( parent == rootNode )
+            break; // root element: makes no CFI step
+        cfiChildScanState scan(p);
+        scanCFIChildren(parent, scan);
+        if ( !scan.found )
+            return false;
+        if ( p->isElement() ) {
+            reversed.add( getCFIElementStep(2*(scan.elementCount+1), p) );
+        }
+        else { // text node, which can only be the node we started from
+            lString32 step;
+            step << "/" << fmt::decimal(2*scan.elementCount + 1);
+            if ( offset >= 0 ) {
+                // Offsets are relative to the whole text chunk
+                lString32 text = p->getText();
+                int o = offset <= text.length() ? offset : text.length();
+                step << ":" << fmt::decimal(scan.textLength + getCFITextLength(text.substr(0, o)));
+            }
+            reversed.add( step );
+        }
+        p = parent;
+    }
+
+    if ( docFragment ) {
+        // Index of the <itemref> in the spine this <DocFragment> was made from
+        int index = 0;
+        ldomNode * parent = docFragment->getParentNode();
+        if ( parent ) {
+            for ( int i=0; i<parent->getChildCount(); i++ ) {
+                ldomNode * sibling = parent->getChildNode(i);
+                if ( sibling == docFragment )
+                    break;
+                if ( sibling->getNodeId() == el_DocFragment )
+                    index++;
+            }
+        }
+
+        // because the OPF DOM is discarded we derive the cfi root by convention
+        steps.add( cs32("/6") );
+        steps.add( cs32("/") + fmt::decimal(2*(index+1)) );
+        // The <body> step, gathered last, is the one reached through the indirection
+        reversed[reversed.length()-1] = cs32("!") + reversed[reversed.length()-1];
+    }
+    for ( int i=reversed.length()-1; i>=0; i-- )
+        steps.add( reversed[i] );
+    return steps.length() > 0;
+}
+
+lString32 ldomEPubCFI::toString()
+{
+    lString32Collection steps;
+    if ( !getCFIPathSteps(_pointer, steps) )
+        return lString32::empty_str;
+    lString32 cfi;
+    for ( int i=0; i<steps.length(); i++ )
+        cfi << steps[i];
+    return cs32("epubcfi(") + cfi + ")";
+}
+
+lString32 ldomEPubCFI::toRangeString( const ldomXPointer & to )
+{
+    if ( _pointer.isNull() || to.isNull() )
+        return lString32::empty_str;
+    if ( _pointer.getNode()->getDocument() != to.getNode()->getDocument() )
+        return lString32::empty_str;
+    // A range is expressed in document order
+    ldomXPointer start = _pointer;
+    ldomXPointer end = to;
+    if ( ldomXPointerEx(start).compare( ldomXPointerEx(end) ) > 0 ) {
+        start = to;
+        end = _pointer;
+    }
+    lString32Collection startSteps;
+    lString32Collection endSteps;
+    if ( !getCFIPathSteps(start, startSteps) || !getCFIPathSteps(end, endSteps) )
+        return lString32::empty_str;
+
+    // The parent path takes the deepest common path. It must not be empty, and
+    // neither may the end subpath; the start subpath may, when the end location
+    // lies within the subtree rooted at the start location.
+    int limit = endSteps.length() - 1;
+    if ( limit > startSteps.length() )
+        limit = startSteps.length();
+    int common = 0;
+    while ( common < limit && startSteps[common] == endSteps[common] )
+        common++;
+    if ( common == 0 )
+        return lString32::empty_str; // no common parent path: no range
+
+    lString32 cfi;
+    for ( int i=0; i<common; i++ )
+        cfi << startSteps[i];
+    cfi << ",";
+    for ( int i=common; i<startSteps.length(); i++ )
+        cfi << startSteps[i];
+    cfi << ",";
+    for ( int i=common; i<endSteps.length(); i++ )
+        cfi << endSteps[i];
+    return cs32("epubcfi(") + cfi + ")";
+}
+
 #if BUILD_LITE!=1
 int ldomDocument::getFullHeight()
 {
@@ -13023,6 +13319,8 @@ static bool findTextRev( const lString32 & str, int & pos, int & endpos, const l
     return false;
 }
 
+inline bool IsWordBoundary( lChar32 ch );
+
 // findTextEnhanced() helpers
 static inline bool isSearchSpaceFoldChar(lChar32 ch)
 {
@@ -13519,6 +13817,7 @@ static bool findTextEnhanced(const lString32 & pattern, bool caseInsensitive, bo
     ranges.clear();
     if (pattern.empty())
         return false;
+    bool wholeWordsOnly = (searchFlags & LDOM_FIND_TEXT_MATCH_WHOLE_WORDS) != 0;
 
     if (reverse) {
         if (!end.isText()) {
@@ -13543,6 +13842,21 @@ static bool findTextEnhanced(const lString32 & pattern, bool caseInsensitive, bo
                 int offs = block.text.length();
                 int endpos;
                 while (::findTextRev(block.text, offs, endpos, pattern, patternIsRegex)) {
+                    if (wholeWordsOnly) {
+                        // We reuse the existing word-boundary helpers so whole-word search
+                        // stays consistent with word navigation; but unlike then, we treat
+                        // hyphens as boundaries so "operate" can match in "co-operate".
+                        bool leftBoundary = offs <= 0
+                                            || IsWordBoundary(block.text[offs - 1])
+                                            || (lGetCharProps(block.text[offs - 1]) & CH_PROP_HYPHEN) != 0;
+                        bool rightBoundary = endpos >= block.text.length()
+                                            || IsWordBoundary(block.text[endpos])
+                                            || (lGetCharProps(block.text[endpos]) & CH_PROP_HYPHEN) != 0;
+                        if (!leftBoundary || !rightBoundary) {
+                            offs--;
+                            continue;
+                        }
+                    }
                     appendFindTextMatchRange(block, offs, endpos, ranges);
                     if (firstFoundTextY == -1 && maxHeight > 0 && ranges.length() > 0) {
                         ldomXRange * firstRange = ranges[ranges.length() - 1];
@@ -13594,6 +13908,21 @@ static bool findTextEnhanced(const lString32 & pattern, bool caseInsensitive, bo
                 int offs = 0;
                 int endpos;
                 while (::findText(block.text, offs, endpos, pattern, patternIsRegex)) {
+                    if (wholeWordsOnly) {
+                        // We reuse the existing word-boundary helpers so whole-word search
+                        // stays consistent with word navigation; but unlike them, we treat
+                        // hyphens as boundaries so "operate" can match in "co-operate".
+                        bool leftBoundary = offs <= 0
+                                            || IsWordBoundary(block.text[offs - 1])
+                                            || (lGetCharProps(block.text[offs - 1]) & CH_PROP_HYPHEN) != 0;
+                        bool rightBoundary = endpos >= block.text.length()
+                                            || IsWordBoundary(block.text[endpos])
+                                            || (lGetCharProps(block.text[endpos]) & CH_PROP_HYPHEN) != 0;
+                        if (!leftBoundary || !rightBoundary) {
+                            offs++;
+                            continue;
+                        }
+                    }
                     // Convert match indices in the transient block buffer back to
                     // a DOM range using the per-codepoint origin mapping.
                     appendFindTextMatchRange(block, offs, endpos, ranges);
@@ -22416,31 +22745,40 @@ void ldomDocument::setNodeNumberingProps( lUInt32 nodeDataIndex, ListNumberingPr
     lists.set(nodeDataIndex, v);
 }
 
-/// returns the sum of this node and its parents' top and bottom margins, borders and paddings
+/// returns the sum of the decorations (margin, border, padding) enclosing this node in document flow
 /// (provide account_height_below_strut_baseline=true for images, as they align on the baseline,
 /// so their container would be larger because of the strut)
 int ldomNode::getSurroundingAddedHeight(bool account_height_below_strut_baseline)
 {
     int h = 0;
     ldomNode * n = this;
+    // Reserve an ancestor's top/bottom decorations only while this node is
+    // still at that edge in the block flow. Body padding should constrain
+    // an image that is the body's only block content, but not one between
+    // other blocks.
+    bool has_top_edge = true;
+    bool has_bottom_edge = true;
     while (true) {
         ldomNode * parent = n->getParentNode();
         lvdom_element_render_method rm = n->getRendMethod();
         if ( rm != erm_inline && rm != erm_invisible && rm != erm_killed) {
-            // Add offset of border and padding
+            // Margins and padding in % are scaled according to parent's width.
             int base_width = 0;
             if ( parent && !(parent->isNull()) ) {
-                // margins and padding in % are scaled according to parent's width
                 RenderRectAccessor fmt( parent );
                 base_width = fmt.getWidth();
             }
             css_style_ref_t style = n->getStyle();
-            h += lengthToPx( n, style->margin[2], base_width );  // top margin
-            h += lengthToPx( n, style->margin[3], base_width );  // bottom margin
-            h += lengthToPx( n, style->padding[2], base_width ); // top padding
-            h += lengthToPx( n, style->padding[3], base_width ); // bottom padding
-            h += measureBorder(n, 0); // top border
-            h += measureBorder(n, 2); // bottom border
+            if ( has_top_edge ) {
+                h += lengthToPx( n, style->margin[2], base_width );
+                h += lengthToPx( n, style->padding[2], base_width );
+                h += measureBorder(n, 0);
+            }
+            if ( has_bottom_edge ) {
+                h += lengthToPx( n, style->margin[3], base_width );
+                h += lengthToPx( n, style->padding[3], base_width );
+                h += measureBorder(n, 2);
+            }
             if ( account_height_below_strut_baseline && rm == erm_final ) {
                 if ( n == this && isImage() ) {
                     // We're usually called on an image by lvtextfm.cpp, where lvrend.cpp,
@@ -22493,6 +22831,25 @@ int ldomNode::getSurroundingAddedHeight(bool account_height_below_strut_baseline
         }
         if ( !parent || parent->isNull() )
             break;
+        // Look for direct block-like siblings on either side. Text/inline,
+        // hidden/killed nodes and floatBoxes do not move normal-flow content.
+        for ( int side = 0; side < 2; side++ ) {
+            bool top = side == 0;
+            int idx = n->getNodeIndex() + (top ? -1 : 1);
+            while ( idx >= 0 && idx < parent->getChildCount() ) {
+                ldomNode * sibling = parent->getChildNode(idx);
+                lvdom_element_render_method rm = sibling->getRendMethod(); // returns erm_invisible for text nodes
+                if ( rm != erm_inline && rm != erm_invisible && rm != erm_killed && !sibling->isFloatingBox() )
+                    break; // There is a sibling in the block axis: this is not an edge
+                idx += top ? -1 : 1;
+            }
+            if ( idx >= 0 && idx < parent->getChildCount() ) {
+                if ( top )
+                    has_top_edge = false;
+                else
+                    has_bottom_edge = false;
+            }
+        }
         n = parent;
     }
     return h;

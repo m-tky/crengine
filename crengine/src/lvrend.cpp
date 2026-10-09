@@ -3673,9 +3673,9 @@ static inline bool shouldApplyVerticalRlDefaultInterline( ldomNode *enode,
 //   int h = LFormattedTextRef->Format((lUInt16)width, (lUInt16)page_h)
 // to do the actual width-constrained rendering of the AddSource*'ed objects.
 // Note: fmt is the RenderRectAccessor of the final block itself, and is passed
-// as is to the inline children elements: it is only used to get the width of
-// the container, which is only needed to compute indent (text-indent) values in %,
-// and to get paragraph direction (LTR/RTL/UNSET).
+// as is to the inline children elements: it is used to get the container width
+// for text-indent:NN%, paragraph direction (LTR/RTL/UNSET), and the height:NN%
+// base to keep in the formatter for measuring inline images.
 void renderFinalBlock( ldomNode * enode, LFormattedText * txform, RenderRectAccessor * fmt, lUInt32 & baseflags,
                        int indent, int line_h, TextLangCfg * lang_cfg, lUInt32 bgcolor, int valign_dy,
                        bool * is_link_start, lString32 running_bidi_ctrlchars )
@@ -3700,6 +3700,11 @@ void renderFinalBlock( ldomNode * enode, LFormattedText * txform, RenderRectAcce
         lvdom_element_render_method rm = enode->getRendMethod();
         if ( rm == erm_invisible )
             return; // don't draw invisible
+
+        if ( rm == erm_final ) {
+            // txform may need it for inline images sizing
+            txform->setPercentHeightBase(fmt->getPercentHeightBase());
+        }
 
         if ( enode->hasEffectiveAttribute( attr_lang ) ) {
             lString32 lang_tag = enode->getEffectiveAttributeValue( attr_lang );
@@ -4238,19 +4243,14 @@ void renderFinalBlock( ldomNode * enode, LFormattedText * txform, RenderRectAcce
                 valign_dy -= lengthToPx(enode, vertical_align, base_pct, base_em);
             }
         }
-        switch ( style->text_decoration ) {
-            case css_td_underline:
-            case css_td_blink: // (render it underlined)
-                flags |= LTEXT_TD_UNDERLINE;
-                break;
-            case css_td_overline:
-                flags |= LTEXT_TD_OVERLINE;
-                break;
-            case css_td_line_through:
-                flags |= LTEXT_TD_LINE_THROUGH;
-                break;
-            default:
-                break;
+        if ( (style->text_decoration & css_td_underline) || (style->text_decoration & css_td_blink) ) {
+            flags |= LTEXT_TD_UNDERLINE; // (render blink as underline)
+        }
+        if ( style->text_decoration & css_td_overline ) {
+            flags |= LTEXT_TD_OVERLINE;
+        }
+        if ( style->text_decoration & css_td_line_through ) {
+            flags |= LTEXT_TD_LINE_THROUGH;
         }
         switch ( style->hyphenate ) {
             case css_hyph_auto:
@@ -6101,7 +6101,8 @@ private:
         int c_x;  // horizontal flow position (for vertical text)
         int l_x;  // horizontal level start (for vertical text)
         bool avoid_pb_inside;
-        void reset(int dir, lInt32 langNodeIdx, int xmin, int xmax, int overxmin, int overxmax, int ly, int iymin, int iymax, bool avoidpbinside, int cx=0, int lx=0) {
+        int percent_height_base; // content-box height of the parent level (used by children for height:NN%)
+        void reset(int dir, lInt32 langNodeIdx, int xmin, int xmax, int overxmin, int overxmax, int ly, int iymin, int iymax, bool avoidpbinside, int percentHeightBase, int cx=0, int lx=0) {
             direction = dir;
             lang_node_idx = langNodeIdx;
             x_min = xmin;
@@ -6114,8 +6115,9 @@ private:
             c_x = cx;
             l_x = lx;
             avoid_pb_inside = avoidpbinside;
+            percent_height_base = percentHeightBase;
         }
-        BlockShift(int dir, lInt32 langNodeIdx, int xmin, int xmax, int overxmin, int overxmax, int ly, int iymin, int iymax, bool avoidpbinside, int cx=0, int lx=0) :
+        BlockShift(int dir, lInt32 langNodeIdx, int xmin, int xmax, int overxmin, int overxmax, int ly, int iymin, int iymax, bool avoidpbinside, int percentHeightBase, int cx=0, int lx=0) :
                 direction(dir),
                 lang_node_idx(langNodeIdx),
                 x_min(xmin),
@@ -6127,7 +6129,8 @@ private:
                 in_y_max(iymax),
                 c_x(cx),
                 l_x(lx),
-                avoid_pb_inside(avoidpbinside)
+                avoid_pb_inside(avoidpbinside),
+                percent_height_base(percentHeightBase)
                 { }
     };
     class BlockFloat : public lvRect {
@@ -6194,6 +6197,7 @@ private:
     int  in_y_max;    //   that overflow this level height)
     int  c_x;         // current x for vertical flow (right-to-left accumulation)
     int  l_x;         // x at which current level started (for vertical text)
+    int  percent_height_base; // content-box height for children to resolve height:NN% (-1 if no height to resolve %)
     int  x_min;       // current left min x
     int  x_max;       // current right max x
     int  usable_overflow_x_min;  // current left and right x usable for glyph overflows and hanging punctuation,
@@ -6244,6 +6248,7 @@ public:
         in_y_max(0),
         c_x(0),
         l_x(0),
+        percent_height_base(-1),
         x_min(0),
         x_max(width),
         baseline_req(REQ_BASELINE_NOT_NEEDED),
@@ -6338,6 +6343,9 @@ public:
     }
     int getCurrentLevelAbsoluteY() {
         return l_y;
+    }
+    int getPercentHeightBase() {
+        return percent_height_base;
     }
     int getPageHeight() {
         return page_height;
@@ -7246,18 +7254,18 @@ public:
     // Enter/leave a block level: backup/restore some of this FlowState
     // fields, and do some housekeeping.
     void newBlockLevel( int width, int d_left, int usable_overflow_reset_left, int usable_overflow_reset_right,
-                                bool avoid_pb, int dir, lInt32 langNodeIdx ) {
+                                bool avoid_pb, int dir, lInt32 langNodeIdx, int child_percent_height_base ) {
         // Don't new/delete to avoid too many malloc/free, keep and re-use/reset
         // the ones already created
         if ( _shifts.length() <= level ) {
             _shifts.push( new BlockShift( direction, lang_node_idx,
                                     x_min, x_max, usable_overflow_x_min, usable_overflow_x_max,
-                                    l_y, in_y_min, in_y_max, avoid_pb_inside, c_x, l_x ) );
+                                    l_y, in_y_min, in_y_max, avoid_pb_inside, percent_height_base, c_x, l_x ) );
         }
         else {
             _shifts[level]->reset( direction, lang_node_idx,
                                     x_min, x_max, usable_overflow_x_min, usable_overflow_x_max,
-                                    l_y, in_y_min, in_y_max, avoid_pb_inside, c_x, l_x );
+                                    l_y, in_y_min, in_y_max, avoid_pb_inside, percent_height_base, c_x, l_x );
         }
         direction = dir;
         if (langNodeIdx != -1)
@@ -7275,6 +7283,7 @@ public:
         if ( isVertical() ) {
             l_x = c_x;
         }
+        percent_height_base = child_percent_height_base;
         level++;
         // Don't disable any upper avoid_pb_inside
         if ( avoid_pb ) {
@@ -7305,6 +7314,7 @@ public:
         if ( isVertical() ) {
             l_x = prev->l_x;
         }
+        percent_height_base = prev->percent_height_base;
         if ( prev->avoid_pb_inside != avoid_pb_inside )
             avoid_pb_inside_just_toggled_off = true;
         avoid_pb_inside = prev->avoid_pb_inside;
@@ -8452,10 +8462,57 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         // like it's just best to always force BR to be css_d_inline, which we do
         // in setNodeStyle(). So, we'll never meet any <BR> here.
 
-    // Get any style height to be ensured below (just before we add bottom
-    // padding when erm_block or erm_final)
-    // Otherwise, this block height will just be its rendered content height.
+    // We may ensure a style height below (just before we add bottom padding
+    // when erm_block or erm_final). Otherwise, this block height will just
+    // be its rendered content height.
+    // Note: we'll always use the height needed to show this block content
+    // without overflowing, even if we resolve a smaller height here.
     int style_h = -1;
+
+    // Resolve height:NN% when the parent content-box height is known. This
+    // both ensures the height of regular blocks and provides the base for
+    // nested percentage heights. In particular, when the formatter later
+    // meets a cover image in height:100% wrappers, it would not be able
+    // to easily recover that ancestor height: we keep/update it in FlowState
+    // while rendering the blocks so the formatter has it available.
+    int percent_height_base = -1;
+    int resolved_content_height = -1;
+    int page_style_height_limit = -1; // we may cap style_h to this when done
+    if ( style->height.type == css_val_percent ) {
+        int parent_percent_height_base = flow->getPercentHeightBase();
+        if ( parent_percent_height_base >= 0 ) {
+            resolved_content_height = lengthToPx(enode, style->height, parent_percent_height_base);
+        }
+    }
+    else if ( style->height.type != css_val_unspecified &&
+              ( BLOCK_RENDERING(flags, ALLOW_STYLE_W_H_ABSOLUTE_UNITS) ||
+                style->height.type == css_val_screen_px ||
+                is_length_relative_unit(style->height.type) ) ) {
+        resolved_content_height = lengthToPx(enode, style->height, 0);
+    }
+    if ( resolved_content_height >= 0 ) {
+        if ( style->box_sizing != css_bs_content_box ) { // border-box height
+            resolved_content_height -= padding_top + padding_bottom;
+            if ( resolved_content_height < 0 ) {
+                resolved_content_height = 0;
+            }
+        }
+        // The formatter later caps images to this same page budget. Cap this
+        // base too: otherwise a large percentage image would first resolve
+        // large, then shrink proportionally and get a different width.
+        int max_usable_height = flow->getPageHeight() - enode->getSurroundingAddedHeight(false);
+        if ( max_usable_height < 0 ) {
+            max_usable_height = 0;
+        }
+        if ( resolved_content_height > max_usable_height ) {
+            resolved_content_height = max_usable_height;
+        }
+        percent_height_base = resolved_content_height;
+        page_style_height_limit = max_usable_height + padding_top + padding_bottom;
+    }
+
+    // Get any style height to ensure. For height:NN%, use the just-resolved
+    // content-box height; for other values, use the usual CSS length handling.
     if ( is_floating || is_inline_box ) {
         // Nothing special to do: the child style height will be
         // enforced by subcall to renderBlockElement(child)
@@ -8464,15 +8521,18 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         // We always use the style height for <HR>, to actually have a height to fill
         // with its color (as some of our css files render them via height)
         css_length_t style_height = style->height;
-        // If css_generic_fit_content, nothing to do, it is our default behaviour
         if ( is_empty_line_elem && style_height.type == css_val_unspecified ) {
             // No height specified: default to line-height, just like
             // if it were rendered final.
             style_height.value = getLineHeightPx(enode, style.get(), enode->getFont());
             style_height.type = css_val_screen_px;
         }
-        // We don't have a container height to apply heights in %, so ignore them
-        if ( style_height.type != css_val_unspecified && style_height.type != css_val_percent ) {
+        if ( style_height.type == css_val_percent ) {
+            if ( resolved_content_height >= 0 ) {
+                style_h = resolved_content_height + padding_top + padding_bottom;
+            }
+        }
+        else if ( style_height.type != css_val_unspecified ) {
             if ( BLOCK_RENDERING(flags, ALLOW_STYLE_W_H_ABSOLUTE_UNITS) ||
                  style_height.type == css_val_screen_px ||
                  is_length_relative_unit(style_height.type) ||
@@ -8488,7 +8548,9 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 }
             }
         }
-        // Note: we'll always use the height needed to show this block content without overflowing
+        // css_val_unspecified + css_generic_fit_content needs nothing done:
+        // it is our default behaviour.
+
         css_length_t style_max_height = style->max_height;
         if ( style_max_height.type != css_val_unspecified &&
              style_max_height.type != css_val_percent &&
@@ -8521,6 +8583,11 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 }
             }
         }
+    }
+    // Don't let this height's empty fill exceed the same page budget used
+    // for the percentage base.
+    if ( page_style_height_limit >= 0 && style_h > page_style_height_limit ) {
+        style_h = page_style_height_limit;
     }
 
     // Compute this block width
@@ -8694,7 +8761,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         // width, they should stick to the image.
         int img_width = 0;
         int img_height = 0;
-        getStyledImageSize( enode, img_width, img_height, container_width, -1, true );
+        getStyledImageSize( enode, img_width, img_height, container_width, flow->getPercentHeightBase(), true );
         // Not mentionned in the CSS2 specs, but browsers do apply any padding between the image and its borders
         width = padding_left + img_width + padding_right;
         // In case style's width and height were in %, update them to the computed value
@@ -9421,7 +9488,8 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                        usable_overflow_reset_left, usable_overflow_reset_right,
                        break_inside==RN_SPLIT_AVOID,
                        direction,
-                       has_lang_attribute ? enode->getDataIndex() : -1);
+                       has_lang_attribute ? enode->getDataIndex() : -1,
+                       percent_height_base);
 
                 if (padding_top>0) {
                     // This may push accumulated vertical margin
@@ -9563,7 +9631,9 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                     flow->getPageContext()->leaveFootNote();
 
                 if (style_h >= 0) {
-                    current_h = flow->getCurrentRelativeY() + padding_bottom;
+                    // addContentSpace() will push a pending child margin before adding fill,
+                    // so account for it when computing that fill.
+                    current_h = flow->getCurrentRelativeY() + flow->getCurrentVerticalMargin() + padding_bottom;
                     int pad_h = style_h - current_h;
                     if (pad_h > 0) {
                         if (pad_h > flow->getPageHeight()) // don't pad more than one page height
@@ -9821,6 +9891,10 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 }
                 fmt.setUsableLeftOverflow( usable_overflow_left );
                 fmt.setUsableRightOverflow( usable_overflow_right );
+                // For an erm_final image, its height:NN% uses the parent level base;
+                // a normal final block provides its own content-box base to its inline images.
+                int final_percent_height_base = is_image ? flow->getPercentHeightBase() : percent_height_base;
+                fmt.setPercentHeightBase(final_percent_height_base);
                 // Done with updating RenderRectAccessor fields, have them saved
                 fmt.push();
                 // (These setInner* needs to be set before creating float_footprint if
@@ -11973,10 +12047,19 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
         */
     }
 
-    // text-decoration should not be inherited per CSS specs, but our quite
-    // limited support for it requires us to have its initial value be
-    // inherit, and to get it inherited by children.
-    UPDATE_STYLE_FIELD( text_decoration, css_td_inherit );
+    // text-decoration should not be inherited per CSS specs, but the resulting
+    // decorations apply across descendants. So, when a node specifies its own
+    // decorations, merge them with the parent's instead of replacing them.
+    if ( pstyle->text_decoration == css_td_inherit ) {
+        pstyle->text_decoration = parent_style->text_decoration;
+    }
+    else {
+        pstyle->text_decoration = (parent_style->text_decoration & ~css_td_none)
+                                | (pstyle->text_decoration & ~css_td_none);
+        if ( !pstyle->text_decoration ) {
+            pstyle->text_decoration = css_td_none;
+        }
+    }
 
     // Note: we don't inherit "direction" (which should be inherited per specs);
     // We'll handle inheritance of direction in renderBlockEnhanced, because
