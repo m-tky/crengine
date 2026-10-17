@@ -47,6 +47,7 @@ set(CRE_SRCS
     crengine/src/lvpagesplitter.cpp
     crengine/src/lvrend.cpp
     crengine/src/lvrend_vert_diag.cpp
+    crengine/src/lvrend_vert_cover.cpp
     crengine/src/lvstream.cpp
     crengine/src/lvstring.cpp
     crengine/src/lvstsheet.cpp

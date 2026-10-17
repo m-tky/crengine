@@ -138,7 +138,14 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 //         extents for orthogonal spacers and images in mixed-content lines.
 //         These alter word positions, line dimensions and parent auto sizing;
 //         old cached formatted geometry must be discarded.
-#define FORMATTING_VERSION_ID 0x0050
+// 0x0051: recompute vertical center/end alignment after JFM expansion and
+//         isolate the opening cover fragment from the following title page.
+//         Existing render caches must not retain the old geometry/page breaks.
+// 0x0052: reserve the full cross-axis allocation for isolated vertical covers
+//         so their image is centered without moving it outside the page clip.
+// 0x0053: cover cross-axis regions are formatter inputs, shared by initial
+//         layout and all cache rebuilds instead of post-format corrections.
+#define FORMATTING_VERSION_ID 0x0053
 
 #ifndef DOC_DATA_COMPRESSION_LEVEL
 /// data compression level (0=no compression, 1=fast compressions, 3=normal compression)
@@ -267,6 +274,7 @@ enum CacheFileBlockType {
 #include "../include/fb2def.h"
 #if BUILD_LITE!=1
 #include "../include/lvrend.h"
+#include "../include/lvrend_vert_cover.h"
 #include "../include/lvlogical.h"
 #include "../include/chmfmt.h"
 #endif
@@ -23034,6 +23042,8 @@ int ldomNode::renderFinalBlock(  LFormattedTextRef & frmtext, RenderRectAccessor
     // Format/render inner content: this makes lines and words, which are
     // cached into the LFormattedText and ready to be used for drawing
     // and text selection.
+    if ( css_wm_is_vertical(effective_writing_mode) )
+        configureVerticalCoverFormatting(this, f.get());
     int h = f->Format((lUInt16)width, (lUInt16)page_h, direction,
                             effective_writing_mode, usable_left_overflow, usable_right_overflow,
                             getDocument()->getHangingPunctiationEnabled(), float_footprint);

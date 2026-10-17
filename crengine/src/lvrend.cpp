@@ -20,6 +20,7 @@
 #include "../include/fb2def.h"
 #include "../include/lvrend.h"
 #include "../include/lvrend_vert_diag.h"
+#include "../include/lvrend_vert_cover.h"
 #include "../include/lvlogical.h"
 #include "../include/renderutil.h"
 #include "../include/drawutil.h"
@@ -9188,6 +9189,8 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
     int break_before = CssPageBreak2Flags( style->page_break_before );
     int break_after = CssPageBreak2Flags( style->page_break_after );
     int break_inside = CssPageBreak2Flags( style->page_break_inside );
+    if ( flow->isVertical() && isVerticalCoverFragment(enode) )
+        break_after = RN_SPLIT_ALWAYS;
     // Note: some test suites seem to indicate that an inner "break-inside: auto"
     // can override an outer "break-inside: avoid". We don't ensure that.
 
