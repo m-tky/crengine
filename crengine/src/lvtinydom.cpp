@@ -101,10 +101,9 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 
 /// change in case of incompatible changes in swap/cache file format to avoid using incompatible swap file
 // increment to force complete reload/reparsing of old file
-// vwm4: style-cache records now persist writing-mode-related properties.
-// Older records hash those properties but do not serialize them, making every
-// vertical document fail style restoration and trigger a full render.
-#define CACHE_FILE_FORMAT_VERSION "3.05.83k-vwm4"
+// vwm4: style-cache records persist writing-mode-related properties in addition
+// to the upstream font-width property. Keep fork and upstream caches distinct.
+#define CACHE_FILE_FORMAT_VERSION "3.05.84k-vwm4"
 /// increment following value to force re-formatting of old book after load
 // 0x0036: vertical-rl page splitter uses a separate vert_split_page_h field
 //         (= page_width) for page-split boundaries while keeping page_h at
@@ -4340,6 +4339,18 @@ static void writeSVGNode( LVStream * stream, ldomNode * node, bool forward_node_
                     svalue << ";";
                 }
             }
+            // font-width (stored in tenths of a percent)
+            if ( (is_top_node ? style->font_width != css_fwd_normal : style->font_width != pstyle->font_width)
+                    || style->isImportant(imp_bit_font_width) ) {
+                int tenths = style->font_width ? style->font_width : css_fwd_normal;
+                svalue << "font-width: " << lString8::itoa(tenths / 10);
+                if ( tenths % 10 )
+                    svalue << "." << lString8::itoa(tenths % 10);
+                svalue << "%";
+                if ( style->isImportant(imp_bit_font_width) )
+                    svalue << " !important";
+                svalue << ";";
+            }
             // color
             if ( is_top_node || !(style->color == pstyle->color) || style->isImportant(imp_bit_color) ) {
                 if ( style->color.type == css_val_color ) {
@@ -5148,9 +5159,7 @@ public:
             // the same CSS file gets its own scoped copy of the font.
             const LVArray<LVStyleSheet::LVFontFaceDecl> & decls = cached->getFontFaceDecls();
             for (int i = 0; i < decls.length(); i++) {
-                _document->registerFontFace(decls[i].url, decls[i].face,
-                                            decls[i].weight, decls[i].italic,
-                                            decls[i].isLocal);
+                _document->registerFontFace(decls[i].url, decls[i].face, decls[i].weight, decls[i].width, decls[i].italic, decls[i].isLocal);
             }
             return true;
         }
@@ -5293,6 +5302,7 @@ bool ldomDocument::setRenderProps( int width, int dy, bool /*showCover*/, int /*
     s->font_size = css_length_t(css_val_screen_px, def_font->getSize()); // we use screen_px, as we got the real font size from FontManager
     s->font_name = def_font->getTypeFace();
     s->font_weight = 400;
+    s->font_width = css_fwd_normal;
     s->font_style = css_fs_normal;
     s->font_features = css_length_t(css_val_unspecified, 0);
     s->font_optical_sizing = css_fos_auto; // CSS initial value; enables opsz auto-injection
@@ -11214,7 +11224,8 @@ bool ldomXPointer::getRect(lvRect & rect, bool extended, bool adjusted, int * ct
                                     int chw = word->t.len == 1 ? word->width : w[ offset - word->t.start ] - chx;
                                     bool hyphen_added = false;
                                     if ( offset == word->t.start + word->t.len - 1
-                                            && (word->flags & LTEXT_WORD_CAN_HYPH_BREAK_LINE_AFTER) ) {
+                                            && (word->flags & LTEXT_WORD_CAN_HYPH_BREAK_LINE_AFTER)
+                                            && !src->lang_cfg->hideHyphenationMark() ) {
                                         // if offset is the end of word, and this word has
                                         // been hyphenated, includes the hyphen width
                                         chw += font->getHyphenWidth();
@@ -11372,7 +11383,8 @@ bool ldomXPointer::getRect(lvRect & rect, bool extended, bool adjusted, int * ct
                             int chw = word->t.len == 1 ? word->width : w[ offset - word->t.start ] - chx;
                             bool hyphen_added = false;
                             if ( offset == word->t.start + word->t.len - 1
-                                    && (word->flags & LTEXT_WORD_CAN_HYPH_BREAK_LINE_AFTER) ) {
+                                    && (word->flags & LTEXT_WORD_CAN_HYPH_BREAK_LINE_AFTER)
+                                    && !src->lang_cfg->hideHyphenationMark() ) {
                                 // if offset is the end of word, and this word has
                                 // been hyphenated, includes the hyphen width
                                 chw += font->getHyphenWidth();
@@ -22603,14 +22615,14 @@ void ldomDocument::registerEmbeddedFonts()
         if (url.startsWithNoCase(lString32("res://")) || url.startsWithNoCase(lString32("file://"))) {
             // @font-face { font-family: face; src: url("res://...") or url("file://..."); }
             // url points to a font file outside the document container (e.g. a KOReader resource).
-            if (!fontMan->RegisterExternalFont(getDocIndex(), item->getUrl(), item->getFace(), item->getWeight(), item->getItalic(), item->getDocFragmentIdx())) {
+            if (!fontMan->RegisterExternalFont(getDocIndex(), item->getUrl(), item->getFace(), item->getWeight(), item->getWidth(), item->getItalic(), item->getDocFragmentIdx())) {
                 //CRLog::error("Failed to register external font face: %s file: %s", item->getFace().c_str(), LCSTR(item->getUrl()));
             }
             continue;
         }
         // @font-face { font-family: face; src: url("fonts/foo.ttf"); }
         // url is a path relative to the document container (e.g. an EPUB-embedded font).
-        if (!fontMan->RegisterDocumentFont(getDocIndex(), _container, item->getUrl(), item->getFace(), item->getWeight(), item->getItalic(), item->getDocFragmentIdx())) {
+        if (!fontMan->RegisterDocumentFont(getDocIndex(), _container, item->getUrl(), item->getFace(), item->getWeight(), item->getWidth(), item->getItalic(), item->getDocFragmentIdx())) {
             //CRLog::error("Failed to register document font face: %s file: %s", item->getFace().c_str(), LCSTR(item->getUrl()));
         }
     }
@@ -22630,7 +22642,7 @@ void ldomDocument::registerEmbeddedFonts()
 /// would style against an incomplete font registry and fall back to the
 /// default font -- the same bug class the old pre/post-scan + forceReinitStyles()
 /// design in epubfmt.cpp existed to paper over.
-bool ldomDocument::registerFontFace(lString32 url, lString8 face, int weight, bool italic, bool isLocal)
+bool ldomDocument::registerFontFace(lString32 url, lString8 face, int weight, int width, bool italic, bool isLocal)
 {
     if (url.empty() || face.empty())
         return false;
@@ -22645,13 +22657,13 @@ bool ldomDocument::registerFontFace(lString32 url, lString8 face, int weight, bo
         registered = fontMan->RegisterDocumentFontAlias(getDocIndex(), face, UnicodeToLocal(url), docFragIdx);
     }
     else if (url.startsWithNoCase(lString32("res://")) || url.startsWithNoCase(lString32("file://"))) {
-        registered = fontMan->RegisterExternalFont(getDocIndex(), url, face, weight, italic, docFragIdx);
+        registered = fontMan->RegisterExternalFont(getDocIndex(), url, face, weight, width, italic, docFragIdx);
     }
     else {
-        registered = fontMan->RegisterDocumentFont(getDocIndex(), _container, url, face, weight, italic, docFragIdx);
+        registered = fontMan->RegisterDocumentFont(getDocIndex(), _container, url, face, weight, width, italic, docFragIdx);
     }
     if (registered) {
-        _fontList.add(url, face, weight, italic, isLocal, docFragIdx);
+        _fontList.add(url, face, weight, width, italic, isLocal, docFragIdx);
         // A node styled earlier in this same fresh parse may have already
         // resolved (and cached in _fontMap, keyed by style index) a fallback
         // font for a style referencing this family before it was registered.

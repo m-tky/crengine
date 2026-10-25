@@ -4726,7 +4726,8 @@ void addLineHorizontal( LVFormatter* fmt, int start, int end, int x, src_text_fr
                                 word->width = new_width;
                             }
                         }
-                        word->width += font->getHyphenWidth();
+                        if ( !srcline->lang_cfg->hideHyphenationMark() )
+                            word->width += font->getHyphenWidth();
                         word->min_width = word->width;
                         word->flags |= LTEXT_WORD_CAN_HYPH_BREAK_LINE_AFTER;
                     }
@@ -4884,7 +4885,7 @@ void addLineHorizontal( LVFormatter* fmt, int start, int end, int x, src_text_fr
                                 break;
                             }
                         }
-                        bool ends_with_hyphen = fmt->m_flags[lastnonspace] & LCHAR_ALLOW_HYPH_WRAP_AFTER;
+                        bool ends_with_hyphen = (fmt->m_flags[lastnonspace] & LCHAR_ALLOW_HYPH_WRAP_AFTER) && !srcline->lang_cfg->hideHyphenationMark();
                         int rsb = 0; // don't bother with hyphen rsb, which can't overflow
                         int right_overflow = 0;
                         if ( !ends_with_hyphen ) {
@@ -5378,10 +5379,12 @@ static void tryHyphenBreak(
         // (lStr_findWordBounds() might grab objects or inlineboxes as part of
         // the word, so skip them when looking for a font)
         int _hyphen_width = 0;
-        for ( int i = wstart; i < wend; i++ ) {
-            if ( !(fmt->m_srcs[i]->flags & LTEXT_SRC_IS_OBJECT) ) {
-                _hyphen_width = ((LVFont*)fmt->m_srcs[i]->t.font)->getHyphenWidth();
-                break;
+        if ( !fmt->m_srcs[wordpos]->lang_cfg->hideHyphenationMark() ) {
+            for ( int i = wstart; i < wend; i++ ) {
+                if ( !(fmt->m_srcs[i]->flags & LTEXT_SRC_IS_OBJECT) ) {
+                    _hyphen_width = ((LVFont*)fmt->m_srcs[i]->t.font)->getHyphenWidth();
+                    break;
+                }
             }
         }
         // Use the hyph method of the source node that contains wordpos
@@ -7256,7 +7259,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                 else
                 {
                     bool flgHyphen = false;
-                    if ( word->flags&LTEXT_WORD_CAN_HYPH_BREAK_LINE_AFTER) {
+                    if ( (word->flags & LTEXT_WORD_CAN_HYPH_BREAK_LINE_AFTER) && !srcline->lang_cfg->hideHyphenationMark() ) {
                         if (j==frmline->word_count-1)
                             flgHyphen = true;
                         // Also do that even if it's not the last word in the line
