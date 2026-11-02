@@ -46,6 +46,8 @@ struct VertBodyGlyphMetrics {
     lInt32 y_bearing;
     lInt32 h_advance;
     lInt32 ascender;
+    lInt32 vertical_origin_y; // Unhinted TTB origin in 26.6 units.
+    bool has_vertical_origin;
 };
 
 // True for characters that should be placed by the central-baseline /
@@ -299,12 +301,14 @@ public:
     LVFontVertBodyMetricsCache() : _cache(NULL) {}
     ~LVFontVertBodyMetricsCache() { delete _cache; }
 
-    bool get(hb_font_t * font, lUInt32 glyph_index,
+    bool get(hb_font_t * font, FT_Face face, lUInt32 glyph_index,
              VertBodyGlyphMetrics & out);
     void clear();
 
 private:
     LVHashTable<lUInt32, VertBodyGlyphMetrics> * _cache;
 };
+
+#include "lvfntman_vert_buffer.h"
 
 #endif  // __LV_FNT_MAN_VERT_H_INCLUDED__

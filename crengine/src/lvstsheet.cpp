@@ -21,6 +21,7 @@
 #include "../include/lvstream.h"
 #include "../include/lvrend.h"   // for -cr-only-if:
 #include "../include/lvlogical.h"
+#include "../include/lvlogical_cascade.h"
 
 // define to dump all tokens
 //#define DUMP_CSS_PARSING
@@ -6116,10 +6117,10 @@ static css_length_t read_length( int * &data )
     return len;
 }
 
-// Logical declarations are resolved while applying a rule.  The current
-// style may still carry the inherited marker, so look through the DOM just as
-// the renderer does before choosing the physical storage side.
-static CSSLogical getLogicalAxes(const css_style_rec_t * style, const ldomNode * node)
+// FORK (tategumi): track mapping axes in cascade-local scratch flags. A
+// replay fixes only declarations mapped against a non-final writing mode.
+// Coverage: vertical_logical_cascade_spec.lua and fork_render_helpers_test.cpp.
+static CSSLogical getLogicalAxes(css_style_rec_t * style, const ldomNode * node)
 {
     css_writing_mode_t writing_mode = style->writing_mode;
     if (writing_mode == css_wm_inherit) {
@@ -6132,7 +6133,8 @@ static CSSLogical getLogicalAxes(const css_style_rec_t * style, const ldomNode *
             }
         }
     }
-    return CSSLogical(writing_mode);
+    bool vertical = ForkLogicalCascade::useVertical(style->flags, css_wm_is_vertical(writing_mode));
+    return CSSLogical(vertical ? css_wm_vertical_rl : css_wm_horizontal_tb);
 }
 
 void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) const
@@ -8448,7 +8450,7 @@ void LVCssSelector::applyToPseudoElement( const ldomNode * node, css_style_rec_t
             target_style->flags |= STYLE_REC_FLAG_MATCHED;
         }
         // And apply this selector styling.
-        _decl->apply(target_style);
+        _decl->apply(target_style, node);
     }
     return;
 }

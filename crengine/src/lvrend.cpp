@@ -21,7 +21,9 @@
 #include "../include/lvrend.h"
 #include "../include/lvrend_vert_diag.h"
 #include "../include/lvrend_vert_cover.h"
+#include "../include/lvrend_table_edges.h"
 #include "../include/lvlogical.h"
+#include "../include/lvlogical_cascade.h"
 #include "../include/renderutil.h"
 #include "../include/drawutil.h"
 
@@ -984,6 +986,23 @@ public:
                     case 3: target->border_style_left = css_border_none; break;
                 }
             };
+            // FORK (tategumi): index the fork's shared-edge comparisons without
+            // changing border tie order. Coverage: fork_render_helpers_test.cpp
+            // and vertical_table_axes_spec.lua.
+            ForkTableEdgeIndex<CCRTableCell> inline_ends, block_ends;
+            for (i=0; i<rows.length(); i++) {
+                for (j=0; j<rows[i]->cells.length(); j++) {
+                    CCRTableCell *cell = rows[i]->cells[j];
+                    if (!cell->elem)
+                        continue;
+                    int col = cell->col->index;
+                    int row = cell->row->index;
+                    inline_ends.add(col + cell->colspan, row, row + cell->rowspan, cell);
+                    block_ends.add(row + cell->rowspan, col, col + cell->colspan, cell);
+                }
+            }
+            inline_ends.sort();
+            block_ends.sort();
             // Each cell is responsible for drawing its borders.
             for (i=0; i<rows.length(); i++) {
                 for (j=0; j<rows[i]->cells.length(); j++) {
@@ -997,13 +1016,8 @@ public:
                     css_style_ref_t newstyle(new css_style_rec_t);
                     copystyle(style, newstyle);
 
-                    // We don't do adjacent-cells "border size comparisons and
-                    // take the larger one", as it's not obvious to get here
-                    // this cell's adjactent ones (possibly multiple on a side
-                    // when rowspan/colspan).
-                    // But we should at least, for cells with no border, get the
-                    // top and bottom, and the left and right for cells at
-                    // table edges, from the TR, THEAD/TBODY or TABLE.
+                    // Compare row/group/table candidates first, then adjacent
+                    // cell edges (including rowspan/colspan boundaries).
                     bool is_at_top = cell->row->index == 0;
                     bool is_at_bottom = (cell->row->index + cell->rowspan) == rows.length();
                     bool is_at_left = cell->col->index == 0;
@@ -1084,29 +1098,16 @@ public:
                     int cell_col_end = cell_col_start + cell->colspan;
                     int cell_row_start = cell->row->index;
                     int cell_row_end = cell_row_start + cell->rowspan;
-                    for (int ni = 0; ni < rows.length(); ni++) {
-                        for (int nj = 0; nj < rows[ni]->cells.length(); nj++) {
-                            CCRTableCell * neighbour = rows[ni]->cells[nj];
-                            if (!neighbour->elem || neighbour == cell)
-                                continue;
-                            int neighbour_col_start = neighbour->col->index;
-                            int neighbour_col_end = neighbour_col_start + neighbour->colspan;
-                            int neighbour_row_start = neighbour->row->index;
-                            int neighbour_row_end = neighbour_row_start + neighbour->rowspan;
-                            if (neighbour_col_end == cell_col_start
-                                    && neighbour_row_start < cell_row_end
-                                    && neighbour_row_end > cell_row_start) {
-                                collapse_border(newstyle, cell_border_left, border_left_rank,
-                                    border_inline_start, neighbour->elem, border_inline_end, 6);
-                            }
-                            if (neighbour_row_end == cell_row_start
-                                    && neighbour_col_start < cell_col_end
-                                    && neighbour_col_end > cell_col_start) {
-                                collapse_border(newstyle, cell_border_top, border_top_rank,
-                                    border_block_start, neighbour->elem, border_block_end, 6);
-                            }
-                        }
-                    }
+                    inline_ends.forEachOverlapping(cell_col_start, cell_row_start, cell_row_end,
+                        [&](CCRTableCell *neighbour) {
+                            collapse_border(newstyle, cell_border_left, border_left_rank,
+                                border_inline_start, neighbour->elem, border_inline_end, 6);
+                        });
+                    block_ends.forEachOverlapping(cell_row_start, cell_col_start, cell_col_end,
+                        [&](CCRTableCell *neighbour) {
+                            collapse_border(newstyle, cell_border_top, border_top_rank,
+                                border_block_start, neighbour->elem, border_block_end, 6);
+                        });
 
                     // Now, we should disable some borders for this cell,
                     // at inter-cell boundaries.
@@ -11493,7 +11494,10 @@ inline bool inheritLength( css_length_t & val, css_length_t & parent_val, int pa
     return true;
 }
 
-void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef parent_font, int docFragmentIdx )
+// FORK (tategumi): keep the replay entry point private; public style APIs stay
+// upstream-compatible. Coverage: vertical_logical_cascade_spec.lua.
+static void setNodeStyleInternal( ldomNode * enode, css_style_ref_t parent_style, LVFontRef parent_font,
+                                  int docFragmentIdx, int logical_cascade_flags )
 {
     //lvdomElementFormatRec * fmt = node->getRenderData();
     css_style_ref_t style( new css_style_rec_t );
@@ -11656,6 +11660,7 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
     //////////////////////////////////////////////////////
     // apply style sheet
     //////////////////////////////////////////////////////
+    pstyle->flags |= logical_cascade_flags;
     doc->applyStyle( enode, pstyle );
 
     //////////////////////////////////////////////////////
@@ -11672,10 +11677,38 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
             // would be needed to resolve "background-image: url(...)" relative
             // file path... So these won't work when defined in a style= attribute.
             if ( decl.parse( s, false, doc ) ) {
-                decl.apply( pstyle );
+                // FORK (tategumi): inherited logical sides need the styled node.
+                // Coverage: vertical_logical_cascade_spec.lua.
+                decl.apply( pstyle, enode );
             }
         }
     }
+
+    // FORK (tategumi): replay only when a logical side used non-final axes.
+    // Start from a fresh style to discard incorrectly mapped physical sides;
+    // preserve the original cascade order and !important precedence.
+    // Coverage: vertical_logical_cascade_spec.lua and fork_render_helpers_test.cpp.
+    css_writing_mode_t mode = pstyle->writing_mode;
+    if (mode == css_wm_inherit && !parent_style.isNull())
+        mode = parent_style->writing_mode;
+    bool final_vertical = css_wm_is_vertical(mode);
+    if (!ForkLogicalCascade::isReplay(pstyle->flags)
+            && ForkLogicalCascade::needsReplay(pstyle->flags, final_vertical)) {
+        // These cascade scratch records have raw-pointer ownership and are
+        // normally released below, after pseudo-element creation decisions.
+        delete pstyle->pseudo_elem_before_style;
+        delete pstyle->pseudo_elem_after_style;
+        delete pstyle->pseudo_elem_first_letter_catcher_style;
+        delete pstyle->pseudo_elem_first_line_style;
+        pstyle->pseudo_elem_before_style = NULL;
+        pstyle->pseudo_elem_after_style = NULL;
+        pstyle->pseudo_elem_first_letter_catcher_style = NULL;
+        pstyle->pseudo_elem_first_line_style = NULL;
+        setNodeStyleInternal(enode, parent_style, parent_font, docFragmentIdx,
+                             ForkLogicalCascade::overrideFor(final_vertical));
+        return;
+    }
+    ForkLogicalCascade::clear(pstyle->flags);
 
     #if MATHML_SUPPORT==1
         // We apply our internal MathML stylesheet *after* user-agent (including style tweaks)
@@ -12579,6 +12612,11 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
     // For debugging changes in display/white-space when comparing user-agent stylesheets
     // (which should be avoided to prevent the suggestion to reload the document)
     // printf("%s display:%d white-space:%d\n", UnicodeToUtf8(enode->getNodeName()).c_str(), style->display, style->white_space);
+}
+
+void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef parent_font, int docFragmentIdx )
+{
+    setNodeStyleInternal(enode, parent_style, parent_font, docFragmentIdx, 0);
 }
 
 // Uncomment for debugging getRenderedWidths():
