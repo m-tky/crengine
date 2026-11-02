@@ -721,7 +721,7 @@ void LVFontVertGlyphMetricsCache::clear()
     _has_vert = false;
 }
 
-bool LVFontVertBodyMetricsCache::get(hb_font_t * font, lUInt32 glyph_index,
+bool LVFontVertBodyMetricsCache::get(hb_font_t * font, FT_Face face, lUInt32 glyph_index,
                                      VertBodyGlyphMetrics & out)
 {
     if (!font)
@@ -741,6 +741,17 @@ bool LVFontVertBodyMetricsCache::get(hb_font_t * font, lUInt32 glyph_index,
     out.y_bearing = glyph_extents.y_bearing;
     out.h_advance = hb_font_get_glyph_h_advance(font, glyph_index);
     out.ascender = font_extents.ascender;
+    out.has_vertical_origin = false;
+    out.vertical_origin_y = 0;
+    // Preserve the font's design origin, not the hinted outline's top edge.
+    // Hinting can change the two bearings independently by several pixels.
+    if (face && FT_HAS_VERTICAL(face)
+            && !FT_Load_Glyph(face, glyph_index,
+                FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP | FT_LOAD_VERTICAL_LAYOUT)) {
+        out.vertical_origin_y = face->glyph->metrics.horiBearingY
+            + face->glyph->metrics.vertBearingY;
+        out.has_vertical_origin = true;
+    }
     _cache->set(glyph_index, out);
     return true;
 }

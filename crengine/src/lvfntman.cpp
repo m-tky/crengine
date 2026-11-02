@@ -4683,7 +4683,7 @@ public:
             int rr_font_h = _height;
             lUInt8 * rr_buf = NULL;
             if (is_render_rotate && rr_word_w > 0 && rr_font_h > 0) {
-                rr_buf = new lUInt8[rr_word_w * rr_font_h]();
+                rr_buf = new lUInt8[(size_t)rr_word_w * rr_font_h]();
             }
             if ( _hb_features_is_vertical != (is_vertical_draw ? 1 : 0) )
                 setupHBFeatures(is_vertical_draw);
@@ -5040,12 +5040,12 @@ public:
                                 // Virtual-body / central-baseline model (JLReq 2.1.1,
                                 // LuaTeX-ja's capsule_glyph_tate): ordinary CJK is put in a
                                 // uniform 1em capsule.  Its horizontal advance is centred in
-                                // that capsule and every glyph uses the same font ascender as
-                                // baseline.  Do not centre the bitmap rectangle: asymmetric
+                                // that capsule; Y placement preserves its unhinted vertical
+                                // origin relative to the actual raster bitmap.  Do not centre the bitmap rectangle: asymmetric
                                 // kana have deliberately asymmetric ink, so rectangle
                                 // centring makes them snake.  Also do not expose per-glyph
-                                // vertBearingY here: LuaTeX-ja normalises ordinary body glyphs
-                                // to a common capsule baseline.
+                                // hinted vertBearingY here: it can move ordinary body glyphs
+                                // away from their common capsule baseline.
                                 //
                                 // Punctuation (、。), brackets (「」 etc.) and other glyphs
                                 // whose in-slot position IS by design keep their vmtx X
@@ -5104,7 +5104,7 @@ public:
                                         // bitmap, so these are the hinted outline extents that
                                         // correspond to the pixels drawGlyphItem() will use.
                                         VertBodyGlyphMetrics body_metrics;
-                                        if (_vert_body_metrics_cache.get(_hb_font,
+                                        if (_vert_body_metrics_cache.get(_hb_font, _face,
                                                 glyph_info[i].codepoint, body_metrics)) {
                                             lInt64 gx_26_6 = (lInt64)x * 64
                                                 + ((lInt64)_size * 64
@@ -5117,13 +5117,22 @@ public:
                                             // applying the horizontal ascender/bearing here
                                             // shifts glyph ink alone (about 0.3em in the
                                             // target EPUB).
-                                            VertGlyphMetrics vm;
-                                            int vertical_origin_y =
-                                                _vert_metrics_cache.get(_face,
-                                                    glyph_info[i].codepoint, vm)
-                                                ? vm.origin_y : 0;
-                                            lInt64 gy_26_6 = ((lInt64)y
-                                                + vertical_origin_y) * 64;
+                                            // FORK (tategumi): preserve the unhinted vertical
+                                            // origin while placing the actual raster bitmap.
+                                            // Validation: TBMincho capsule trace at 22/32/40px;
+                                            // vertical_char_overlap_spec.lua guards slot spacing.
+                                            lInt64 gy_26_6 = (lInt64)y * 64;
+                                            if (body_metrics.has_vertical_origin) {
+                                                gy_26_6 += body_metrics.vertical_origin_y
+                                                    - (lInt64)item->origin_y * 64;
+                                            } else {
+                                                // Only consult legacy metrics when the design
+                                                // origin is unavailable, not for every glyph.
+                                                VertGlyphMetrics vm;
+                                                if (_vert_metrics_cache.get(_face,
+                                                        glyph_info[i].codepoint, vm))
+                                                    gy_26_6 += (lInt64)vm.origin_y * 64;
+                                            }
                                             gx = roundFontMetricToPixel(gx_26_6);
                                             gy = roundFontMetricToPixel(gy_26_6);
                                             if (logVerticalCapsules()) {
@@ -5134,20 +5143,19 @@ public:
                                                 lInt64 axis_x_rel_26_6 = gx_26_6
                                                     - (lInt64)x * 64
                                                     - body_metrics.x_bearing;
-                                                lInt64 baseline_y_rel_26_6 = gy_26_6
-                                                    - (lInt64)y * 64
-                                                    + body_metrics.y_bearing;
+                                                lInt64 baseline_y_rel_26_6 = (lInt64)(gy - y
+                                                    + item->origin_y) * 64;
                                                 fprintf(stderr,
                                                     "VERT_CAPSULE U+%04X gid=%u "
                                                     "axis_x_rel_26_6=%lld "
                                                     "baseline_y_rel_26_6=%lld "
-                                                    "vby=%d em=%d slot_y=%d gx=%d "
+                                                    "bitmap_y_offset=%d em=%d slot_y=%d gx=%d "
                                                     "glyph_y=%d..%d bmp_h=%d\n",
                                                     (unsigned int)cluster_char,
                                                     (unsigned int)glyph_info[i].codepoint,
                                                     (long long)axis_x_rel_26_6,
                                                     (long long)baseline_y_rel_26_6,
-                                                    vertical_origin_y,
+                                                    gy - y,
                                                     _size, y, gx, gy,
                                                     gy + (int)item->bmp_height,
                                                     (int)item->bmp_height);
@@ -5228,6 +5236,9 @@ public:
                                         int bw = item->bmp_width;
                                         int bh = item->bmp_height;
                                         int pitch = item->bmp_pitch > 0 ? item->bmp_pitch : bw;
+                                        // FORK (tategumi): preserve rotated glyph overflow.
+                                        // Coverage: fork_render_helpers_test.cpp.
+                                        ensureVerticalRotationBufferWidth(rr_buf, rr_word_w, rr_font_h, tx + bw);
                                         for (int py = 0; py < bh; py++) {
                                             int by = ty + py;
                                             if (by < 0 || by >= rr_font_h) continue;
@@ -5344,7 +5355,11 @@ public:
                 int actual_w = x - x0;
                 if (actual_w <= 0) actual_w = rr_word_w;  // fallback (empty word, degenerate)
                 int rot_h = actual_w;
-                lUInt8 * rot_buf = new lUInt8[rot_w * rot_h]();
+                // FORK (tategumi): drawing (notably synthetic bold) can advance
+                // further than measurement. Zero-fill any extra spacing before
+                // rotating. Coverage: fork_render_helpers_test.cpp.
+                ensureVerticalRotationBufferWidth(rr_buf, rr_word_w, rr_font_h, rot_h);
+                lUInt8 * rot_buf = new lUInt8[(size_t)rot_w * rot_h]();
                 for (int ny = 0; ny < rot_h; ny++) {
                     for (int nx = 0; nx < rot_w; nx++) {
                         rot_buf[ny * rot_w + nx] = rr_buf[(rr_font_h - 1 - nx) * rr_word_w + ny];
