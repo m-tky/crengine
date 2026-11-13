@@ -101,9 +101,9 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 
 /// change in case of incompatible changes in swap/cache file format to avoid using incompatible swap file
 // increment to force complete reload/reparsing of old file
-// vwm5: discard styles whose logical sides were resolved before the final
-// writing-mode cascade. Keep fork and upstream caches distinct.
-#define CACHE_FILE_FORMAT_VERSION "3.05.84k-vwm5"
+// vwm6: discard page splits made before forced writing-mode boundary and
+// negative-margin fixes. Keep fork and upstream caches distinct.
+#define CACHE_FILE_FORMAT_VERSION "3.05.84k-vwm6"
 /// increment following value to force re-formatting of old book after load
 // 0x0036: vertical-rl page splitter uses a separate vert_split_page_h field
 //         (= page_width) for page-split boundaries while keeping page_h at

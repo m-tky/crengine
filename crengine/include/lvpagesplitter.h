@@ -54,6 +54,10 @@
 
 #define RN_SPLIT_DISCARD_AT_START 0x400
 
+// FORK (tategumi): a forced writing-mode boundary must beat adjacent AVOID
+// flags, since a page can only be laid out and drawn in one writing mode.
+#define RN_SPLIT_MODE_CHANGE 0x800
+
 #define RN_LINE_IS_RTL 0x1000
 
 #define RN_GET_SPLIT_BEFORE(flags) ((flags >> RN_SPLIT_BEFORE) & 0x7)
