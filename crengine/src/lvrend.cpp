@@ -6219,6 +6219,7 @@ private:
     bool avoid_pb_inside_just_toggled_off;
     bool seen_content_since_page_split; // to avoid consecutive page split when only empty or padding in between
     bool force_next_content_split_before;
+    bool force_next_content_split_mode_change; // FORK (tategumi): mandatory writing-mode boundary
     int  last_split_after_flag; // in case we need to adjust upcoming line's flag vs previous line's
     bool in_non_linear_sequence;
     bool in_combining_non_linear_sequence;
@@ -6233,6 +6234,7 @@ private:
     ldomNode * vm_target_node;     // target element that will be shifted by the collapsed margin
     int  vm_target_level;          // level of this target node
     int  vm_active_pb_flag;        // page-break flag for the whole margin
+    bool vm_active_pb_mode_change; // FORK (tategumi): this break changes writing mode
     int  vm_max_positive_margin;
     int  vm_max_negative_margin;
     int  vm_back_usable_as_margin; // previously moved vertical space where next margin could be accounted in
@@ -6266,6 +6268,7 @@ public:
         avoid_pb_inside_just_toggled_off(false),
         seen_content_since_page_split(false),
         force_next_content_split_before(false),
+        force_next_content_split_mode_change(false),
         last_split_after_flag(RN_SPLIT_AUTO),
         in_non_linear_sequence(false),
         in_combining_non_linear_sequence(false),
@@ -6278,6 +6281,7 @@ public:
         vm_target_node(NULL),
         vm_target_level(0),
         vm_active_pb_flag(RN_SPLIT_AUTO),
+        vm_active_pb_mode_change(false),
         vm_max_positive_margin(0),
         vm_max_negative_margin(0),
         vm_back_usable_as_margin(0)
@@ -6661,6 +6665,13 @@ public:
                 flags |= RN_SPLIT_BEFORE_AVOID | RN_SPLIT_AFTER_AVOID;
             if ( !skip_float_checks && (hasFloatRunningAtY(y0) || hasCarriedInitialLetterAtY(y0)) )
                 flags |= RN_SPLIT_BEFORE_AVOID;
+            // FORK (tategumi): explicit-height blocks can be the first
+            // content after a mode change, before any text/image line.
+            if ( force_next_content_split_before && force_next_content_split_mode_change ) {
+                flags = setSplitBeforeAlways(flags) | RN_SPLIT_MODE_CHANGE;
+                force_next_content_split_before = false;
+                force_next_content_split_mode_change = false;
+            }
             flags |= line_dir_flag;
             context.AddLine(y0, y1, flags);
             y0 = y1;
@@ -6702,15 +6713,20 @@ public:
             // but this has to be done if not done by pushVerticalMargin()
             resetFloatsLevelToTopLevel();
         }
-        if ( force_next_content_split_before ) {
-            flags = setSplitBeforeAlways(flags);
-            force_next_content_split_before = false;
-        }
         // Most often for content lines, lvtextfm.cpp's LVFormatter will
         // have already checked for float (via BlockFloatFootprint), so
         // avoid calling hasFloatRunningAtY() when not needed
         if ( !(flags & RN_SPLIT_BEFORE_AVOID) && (hasFloatRunningAtY(c_y) || hasCarriedInitialLetterAtY(c_y)) )
             flags |= RN_SPLIT_BEFORE_AVOID;
+        // FORK (tategumi): apply the forced break after float/avoid handling,
+        // so the encoded ALWAYS value cannot be ORed with AVOID.
+        if ( force_next_content_split_before ) {
+            flags = setSplitBeforeAlways(flags);
+            if ( force_next_content_split_mode_change )
+                flags |= RN_SPLIT_MODE_CHANGE;
+            force_next_content_split_before = false;
+            force_next_content_split_mode_change = false;
+        }
         flags |= line_dir_flag;
         context.AddLine( flowPos(), flowPos() + height, flags );
         advanceFlowPos( height );
@@ -6791,6 +6807,7 @@ public:
         vm_max_positive_margin = 0;
         vm_max_negative_margin = 0;
         vm_active_pb_flag = RN_SPLIT_AUTO;
+        vm_active_pb_mode_change = false;
         vm_back_usable_as_margin = 0;
     }
     void enableVerticalMargin() {
@@ -6798,7 +6815,8 @@ public:
         // Also drop any back margin added since disabling
         vm_back_usable_as_margin = 0;
     }
-    void addVerticalMargin( ldomNode * node, int height, int pb_flag, bool is_top_margin=false ) {
+    void addVerticalMargin( ldomNode * node, int height, int pb_flag, bool is_top_margin=false,
+                            bool mode_change=false ) {
         if ( vm_disabled ) { // ignore that margin, unless it asks for a page split
             if ( pb_flag != RN_SPLIT_ALWAYS ) {
                 return;
@@ -6881,6 +6899,8 @@ public:
                 }
                 vm_active_pb_flag = RN_SPLIT_ALWAYS;
             }
+            if ( mode_change && vm_active_pb_flag == RN_SPLIT_ALWAYS )
+                vm_active_pb_mode_change = true;
         }
         else if ( pb_flag == RN_SPLIT_AVOID ) {
             if ( vm_active_pb_flag != RN_SPLIT_ALWAYS )
@@ -6936,7 +6956,11 @@ public:
             pushVerticalMargin();
         }
     }
-    int getCurrentVerticalMargin() {
+    int getCurrentVerticalMargin(bool for_content=false) {
+        // FORK (tategumi): content height must use the margin that will
+        // actually be applied; pushVerticalMargin discards it at this break.
+        if ( for_content && is_main_flow && vm_target_node && vm_active_pb_flag == RN_SPLIT_ALWAYS )
+            return 0;
         // The collapsed margin is the max of the positive ones + the min
         // of the negative ones (the most negative one)
         int margin = vm_max_positive_margin + vm_max_negative_margin;
@@ -6992,7 +7016,10 @@ public:
         // at bottom of page before a split (where a non-fully discarded margin would
         // otherwise allow some now-white background to be painted on the whole page).
 
-        if (is_main_flow && margin < 0) { // can only happen if ALLOW_NEGATIVE_COLLAPSED_MARGINS
+        // A forced break must discard negative margins too: otherwise the
+        // next fragment starts before the page boundary and leaks backwards.
+        if (is_main_flow && margin < 0 && vm_active_pb_flag != RN_SPLIT_ALWAYS) {
+            // can only happen if ALLOW_NEGATIVE_COLLAPSED_MARGINS
             // We're moving backward and don't know what was before and what's
             // coming next. Add an empty line to avoid a split there.
             context.AddLine( flowPos(), flowPos(), RN_SPLIT_BOTH_AVOID|line_dir_flag );
@@ -7019,6 +7046,7 @@ public:
                     margin = 0;
                     flags = RN_SPLIT_BEFORE_ALWAYS | RN_SPLIT_AFTER_AVOID;
                     force_next_content_split_before = true;
+                    force_next_content_split_mode_change = vm_active_pb_mode_change;
                     emit_empty = false;
                 }
                 else { // no target node: only bottom margin with some break-after
@@ -7028,7 +7056,8 @@ public:
                     // propagate into the next page", which has a margin-bottom: 1000em
                     // that would make 37 pages - but these 1000em would still be ensured
                     // in scroll mode if we were not limiting a margin to max page_height.)
-                    flags = RN_SPLIT_BEFORE_AUTO | RN_SPLIT_AFTER_ALWAYS | RN_SPLIT_DISCARD_AT_START;
+                    flags = RN_SPLIT_BEFORE_AUTO | RN_SPLIT_AFTER_ALWAYS | RN_SPLIT_DISCARD_AT_START
+                            | (vm_active_pb_mode_change ? RN_SPLIT_MODE_CHANGE : 0);
                 }
                 // Note: floats must have been cleared before calling us if a page-break
                 // has to happen.
@@ -7230,6 +7259,7 @@ public:
         vm_max_positive_margin = 0;
         vm_max_negative_margin = 0;
         vm_active_pb_flag = RN_SPLIT_AUTO;
+        vm_active_pb_mode_change = false;
         vm_has_some = false;
         if ( BLOCK_RENDERING(rend_flags, DO_NOT_CLEAR_OWN_FLOATS) && _floats.length()>0 ) {
             // We did not clear floats, so we may meet them again when
@@ -9206,6 +9236,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         break_before = RN_SPLIT_ALWAYS;
     }
 
+    bool fork_mode_change_break = false;
     // === FORK (mixed writing modes) =========================================
     // If this block carries an explicit writing-mode that differs from the
     // flow's current mode (e.g. a horizontal-tb author-bio / colophon / ad
@@ -9223,6 +9254,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
         flow->switchWritingMode( style->writing_mode );
         break_before = RN_SPLIT_ALWAYS;
         break_after = RN_SPLIT_ALWAYS;
+        fork_mode_change_break = true;
     }
     // If we have a carried initial-letter still active, and we meet a block
     // with HasFirstLetter (which may or may not be an initial-letter), clear
@@ -9239,7 +9271,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
     }
     // We don't shift y yet. We accumulate margin, and, after ensuring
     // collapsing, emit it on the first non-margin real content added.
-    flow->addVerticalMargin( enode, margin_top, break_before, true ); // is_top_margin=true
+    flow->addVerticalMargin( enode, margin_top, break_before, true, fork_mode_change_break ); // is_top_margin=true
 
     LFormattedTextRef txform;
 
@@ -9402,7 +9434,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 if ( isFootNoteBody )
                     flow->getPageContext()->leaveFootNote();
 
-                flow->addVerticalMargin( enode, margin_bottom, break_after );
+                flow->addVerticalMargin( enode, margin_bottom, break_after, false, fork_mode_change_break );
                 return;
             }
             break;
@@ -9642,7 +9674,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 if (style_h >= 0) {
                     // addContentSpace() will push a pending child margin before adding fill,
                     // so account for it when computing that fill.
-                    current_h = flow->getCurrentRelativeY() + flow->getCurrentVerticalMargin() + padding_bottom;
+                    current_h = flow->getCurrentRelativeY() + flow->getCurrentVerticalMargin(true) + padding_bottom;
                     int pad_h = style_h - current_h;
                     if (pad_h > 0) {
                         if (pad_h > flow->getPageHeight()) // don't pad more than one page height
@@ -9783,7 +9815,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                     }
                 }
 
-                flow->addVerticalMargin( enode, margin_bottom, break_after );
+                flow->addVerticalMargin( enode, margin_bottom, break_after, false, fork_mode_change_break );
                 if ( no_margin_collapse ) {
                     // Push our margin so it does not get collapsed with some later one
                     flow->pushVerticalMargin();
@@ -10300,7 +10332,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                     }
                 }
 
-                flow->addVerticalMargin( enode, margin_bottom, break_after );
+                flow->addVerticalMargin( enode, margin_bottom, break_after, false, fork_mode_change_break );
                 if ( no_margin_collapse ) {
                     // Push our margin so it does not get collapsed with some later one
                     flow->pushVerticalMargin();
