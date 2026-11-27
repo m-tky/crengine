@@ -70,7 +70,8 @@ jobs:
         sudo dpkg -i *.deb
         # Install stylelint.
         npm init --yes
-        npm install @csstools/stylelint-formatter-github stylelint stylelint-config-standard
+        # Keep the formatter, linter, and config on compatible Stylelint 17 versions.
+        npm install @csstools/stylelint-formatter-github@2.0.0 stylelint@17.16.0 stylelint-config-standard@40.0.0
 
     - name: Cache buildcache directory
       uses: actions/cache@v6

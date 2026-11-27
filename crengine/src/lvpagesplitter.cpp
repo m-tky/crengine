@@ -1324,8 +1324,13 @@ public:
                 int cur_after = cur_line->getSplitAfter();
                 int nxt_before = nxt_line->getSplitBefore();
                 if ( cur_after==RN_SPLIT_AVOID || nxt_before==RN_SPLIT_AVOID) {
-                    // Should stick together
-                    continue;
+                    // FORK (tategumi): never merge different writing modes on
+                    // one page, even when an adjacent image requests AVOID.
+                    bool mode_change_break =
+                        (cur_after==RN_SPLIT_ALWAYS && (cur_line->flags & RN_SPLIT_MODE_CHANGE))
+                        || (nxt_before==RN_SPLIT_ALWAYS && (nxt_line->flags & RN_SPLIT_MODE_CHANGE));
+                    if ( !mode_change_break )
+                        continue;
                 }
                 nxt_line_start = nxt_line->getStart();
                 if ( nxt_line_start < cur_line->getEnd() ) {
