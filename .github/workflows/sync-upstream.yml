@@ -45,7 +45,7 @@ jobs:
             exit 0
           fi
 
-          if git diff --quiet origin/master..HEAD; then
+          if git merge-base --is-ancestor HEAD origin/master; then
             echo "NO_UPSTREAM_CHANGES=true" >> $GITHUB_ENV
             exit 0
           fi
