@@ -628,6 +628,11 @@ public:
     bool isVerticalPosition(int doc_y);
     /// Shared right-edge anchor for vertical-rl drawing and coordinate conversion.
     int vertPageRight( const lvRect & pageRect ) const;
+    lvRect vertFootnoteArea( const lvRect & pageRect, const LVRendPageInfo & page );
+    bool windowToDocVertFootnote( lvPoint & pt, int page, int page_rect_idx );
+    bool docToWindowVertFootnote( lvPoint & pt, int page, bool isRectBottom );
+    void drawVertFootnotes( LVDrawBuf & drawbuf, const lvRect & area, const LVRendPageInfo & page,
+                            int page_width, int footnote_margin );
     /// Vertical-rl coordinate conversion for SCROLL view mode.
     /// In SCROLL mode for vertical-rl, _pos is the doc-y anchor at the viewport's
     /// right edge (the entry point for forward reading); doc-y advances correspond

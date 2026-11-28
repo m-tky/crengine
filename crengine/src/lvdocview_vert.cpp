@@ -12,6 +12,7 @@
 
 #include "../include/lvdocview.h"
 #include "../include/fb2def.h"
+#include "../include/lvrend.h"
 
 /// Returns the screen-X anchor for the right edge of a vertical-rl page.
 /// In vertical-rl mode, columns are anchored at page_right: the first column
@@ -27,6 +28,83 @@
 /// rendering and coordinate conversion.
 int LVDocView::vertPageRight( const lvRect & pageRect ) const {
     return pageRect.right - m_pageMargins.right;
+}
+
+// Pin the notes to the block-end margin, leaving any spare width between
+// the body and the notes. Draw and hit-test use the same column anchors.
+lvRect LVDocView::vertFootnoteArea( const lvRect & pageRect, const LVRendPageInfo & page ) {
+    int left = pageRect.left + m_pageMargins.left;
+    int right = left;
+    for ( int i=0; i<page.footnotes.length(); i++ )
+        right += page.footnotes[i].height;
+    return lvRect(left, pageRect.top + m_pageMargins.top + getPageHeaderHeight(),
+                  right, pageRect.bottom - m_pageMargins.bottom);
+}
+
+void LVDocView::drawVertFootnotes( LVDrawBuf & drawbuf, const lvRect & area, const LVRendPageInfo & page,
+                                  int page_width, int footnote_margin ) {
+    auto & extra = *static_cast<draw_extra_info_t *>(drawbuf.GetDrawExtraInfo());
+    const int separator_x = area.right + footnote_margin / 3;
+    extra.draw_body_background = false;
+    extra.content_overflow_clip.left = area.left;
+    extra.content_overflow_clip.right = separator_x;
+    lvRect clip = area;
+    for ( int i=0; i<page.footnotes.length(); i++ ) {
+        // DrawDocument can trigger a partial rerender that invalidates the page.
+        const lUInt32 rerenderings = m_doc->getPartialRerenderingsCount();
+        const LVPageFootNoteInfo & note = page.footnotes[i];
+        clip.left = clip.right - note.height;
+        extra.vert_column_clip_right = clip.right;
+        drawbuf.SetClipRect(&clip);
+        DrawDocument(drawbuf, m_doc->getRootNode(), clip.top, 0, page_width,
+                     note.height, 0, -note.start, m_dy, &m_markRanges, &m_bmkRanges);
+        if ( m_doc->getPartialRerenderingsCount() != rerenderings )
+            return;
+        clip.right = clip.left;
+    }
+    // The separator sits just outside the notes, in the block-axis gap.
+    lvRect separator_clip(area.left, area.top, separator_x + 1, area.bottom);
+    drawbuf.SetClipRect(&separator_clip);
+    lUInt32 cl = (drawbuf.GetTextColor() & 0xFFFFFF) | 0x55000000;
+    drawbuf.FillRect(separator_x, area.top, separator_x + 1, area.top + area.height()/7, cl);
+}
+
+bool LVDocView::windowToDocVertFootnote( lvPoint & pt, int page, int page_rect_idx ) {
+    const LVRendPageInfo & info = *m_pages[page];
+    if ( info.footnotes.length() == 0 )
+        return false;
+    lvRect area = vertFootnoteArea(m_pageRects[page_rect_idx], info);
+    // The right edge corresponds to offset zero in right-to-left progression.
+    if ( pt.x <= area.left || pt.x > area.right || pt.y < area.top || pt.y >= area.bottom )
+        return false;
+    for ( int i=0; i<info.footnotes.length(); i++ ) {
+        const LVPageFootNoteInfo & note = info.footnotes[i];
+        if ( pt.x > area.right - note.height ) {
+            pt = lvPoint(pt.y - area.top, note.start + area.right - pt.x);
+            return true;
+        }
+        area.right -= note.height;
+    }
+    return false;
+}
+
+bool LVDocView::docToWindowVertFootnote( lvPoint & pt, int page, bool isRectBottom ) {
+    for ( int i=0; i<getVisiblePageCount() && page+i<m_pages.length(); i++ ) {
+        const LVRendPageInfo & info = *m_pages[page+i];
+        if ( !isVerticalPage(page+i) || info.footnotes.length() == 0 )
+            continue;
+        lvRect area = vertFootnoteArea(m_pageRects[i], info);
+        for ( int j=0; j<info.footnotes.length(); j++ ) {
+            const LVPageFootNoteInfo & note = info.footnotes[j];
+            int offset = pt.y - note.start;
+            if ( offset >= 0 && (offset < note.height || (isRectBottom && offset == note.height)) ) {
+                pt = lvPoint(area.right - offset, area.top + pt.x);
+                return true;
+            }
+            area.right -= note.height;
+        }
+    }
+    return false;
 }
 
 /// Returns true if any rendered page uses vertical layout (vertical-lr aliases rl).

@@ -1196,6 +1196,11 @@ public:
                 if ( actual_footnote )
                     cur_page_seen_footnotes.add(actual_footnote);
             }
+            // A continuation can start a page before it has any body lines.
+            if ( cur_page_writing_mode < 0 && css_wm_is_vertical(line->writing_mode) ) {
+                cur_page_writing_mode = line->writing_mode;
+                page_height = strideForMode(line->writing_mode);
+            }
             // This footnote line fits
             note_bottom = new_note_bottom;
             accountFootnoteLine(line->flags & RN_LINE_IS_RTL);
@@ -1361,6 +1366,9 @@ public:
             }
             if ( force_new_page || is_last_line ) {
                 flushCurrentPage();
+                // Delayed notes may have opened a new page after the final body line.
+                if ( is_last_line && css_wm_is_vertical(cur_page_writing_mode) )
+                    flushCurrentPage(false);
             }
         }
     }
