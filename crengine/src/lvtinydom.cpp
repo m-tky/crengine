@@ -145,7 +145,8 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 // 0x0053: cover cross-axis regions are formatter inputs, shared by initial
 //         layout and all cache rebuilds instead of post-format corrections.
 // 0x0054: resolve logical box sides against the final writing-mode cascade.
-#define FORMATTING_VERSION_ID 0x0054
+// 0x0055: preserve vertical writing mode on in-page footnote continuations.
+#define FORMATTING_VERSION_ID 0x0055
 
 #ifndef DOC_DATA_COMPRESSION_LEVEL
 /// data compression level (0=no compression, 1=fast compressions, 3=normal compression)

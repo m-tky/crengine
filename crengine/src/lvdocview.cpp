@@ -2206,7 +2206,12 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 			for (int fn = 0; fn < page.footnotes.length(); fn++) {
 				footnotes_height += page.footnotes[fn].height;
 			}
-			if ( has_footnotes) {
+			lvRect vert_notes;
+			if ( has_footnotes && is_vert ) {
+				vert_notes = vertFootnoteArea(*pageRect, page);
+				draw_extra_info.content_overflow_clip.left = vert_notes.right + footnote_margin/2;
+			}
+			if ( has_footnotes && !is_vert ) {
 				// We'll be drawing a separator at 2/3 in the footnote margin.
 				// Allow over-painting to 1/2 in this footnote margin (so any
 				// drop-cap tail and such may not get clipped out.
@@ -2242,10 +2247,14 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 				return; // this page may have been deleted/replaced, and footnotes would be invalid
 			}
 
+			if ( has_footnotes && is_vert )
+				drawVertFootnotes(*drawbuf, vert_notes, page,
+						pageRect->width() - m_pageMargins.left - m_pageMargins.right, footnote_margin);
+			const int horizontal_footnote_count = is_vert ? 0 : page.footnotes.length();
 			// Draw footnotes at the bottom of page (put any remaining blank space above them)
-			int fny = clip.top + (page.height ? page.height + footnote_margin
+			int fny = clip.top + (height ? height + footnote_margin
 					: footnote_margin);
-			if ( has_footnotes) {
+			if ( horizontal_footnote_count ) {
 				int h_avail = m_dy - getPageHeaderHeight()
 						   - m_pageMargins.top - m_pageMargins.bottom
 						   - height - footnote_margin;
@@ -2258,7 +2267,7 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 				draw_extra_info.content_overflow_clip.bottom = fullRect.bottom;
 			}
 			int fy = fny;
-			for (int fn = 0; fn < page.footnotes.length(); fn++) {
+			for (int fn = 0; fn < horizontal_footnote_count; fn++) {
 				int fstart = page.footnotes[fn].start;
 				int fheight = page.footnotes[fn].height;
 				clip.top = fy;
@@ -2276,7 +2285,7 @@ void LVDocView::drawPageTo(LVDrawBuf * drawbuf, LVRendPageInfo & page,
 						&m_markRanges);
 				fy += fheight;
 			}
-			if ( has_footnotes) {
+			if ( horizontal_footnote_count ) {
 				// Draw a small horizontal line as a separator inside
 				// the margin between text and footnotes
 				fny -= footnote_margin * 1/3;
@@ -2750,6 +2759,8 @@ bool LVDocView::windowToDocPoint(lvPoint & pt, bool pullInPageArea) {
 				int screen_y = pt.y;
 				int page_right = vertPageRight( m_pageRects[page_rect_idx] );
 				int draw_x0 = m_pageRects[page_rect_idx].top + m_pageMargins.top + headerHeight;
+				if ( windowToDocVertFootnote(pt, page, page_rect_idx) )
+					return true;
 				// adv = offset into this page's column progression (the vertical
 				// analogue of pt.y in the horizontal branch).  On a partial page
 				// (short chapter end) a tap in the blank left region gives
@@ -2886,6 +2897,8 @@ bool LVDocView::docToWindowPoint(lvPoint & pt, bool isRectBottom, bool fitToPage
                     return true;
                 }
             }
+            if (page >= 0 && docToWindowVertFootnote(pt, page, isRectBottom))
+                return true;
             if (fitToPage) {
                 // If we didn't find pt inside pages, adjust it to top or bottom page y
                 if (page >= 0 && page < m_pages.length() && pt.y < m_pages[page]->start) {
